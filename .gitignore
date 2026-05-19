@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Streamlit secrets — never commit
+.streamlit/secrets.toml
+
+# Local cache DB
+store/*.sqlite
+store/*.db
+
+# CSV drops (raw exports, may contain PII)
+data/linkedin-personal/*.csv
+data/linkedin-personal/*.xlsx
+!data/linkedin-personal/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
