@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     email TEXT,
     firm_type TEXT,
     lifecyclestage TEXT,
+    hs_lead_status TEXT,
     createdate TEXT,
     recent_conversion_event_name TEXT,
     first_conversion_event_name TEXT,
@@ -26,6 +27,11 @@ CREATE TABLE IF NOT EXISTS contacts (
     hs_analytics_source_data_1 TEXT,
     hs_analytics_source_data_2 TEXT,
     num_conversion_events INTEGER,
+    num_associated_deals INTEGER,
+    notes_last_contacted TEXT,
+    hs_email_last_open_date TEXT,
+    hs_email_last_click_date TEXT,
+    hubspot_owner_id TEXT,
     company_id TEXT,
     fetched_at TEXT
 );
@@ -47,6 +53,59 @@ CREATE INDEX IF NOT EXISTS idx_contacts_firm_type ON contacts(firm_type);
 CREATE INDEX IF NOT EXISTS idx_contacts_createdate ON contacts(createdate);
 CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
 CREATE INDEX IF NOT EXISTS idx_companies_firm_type ON companies(firm_type);
+
+CREATE TABLE IF NOT EXISTS forms (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    fetched_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS form_submissions (
+    conversion_id TEXT PRIMARY KEY,
+    form_id TEXT,
+    contact_email TEXT,
+    submitted_at TEXT,
+    fetched_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_submissions_form ON form_submissions(form_id);
+CREATE INDEX IF NOT EXISTS idx_submissions_email ON form_submissions(contact_email);
+
+CREATE TABLE IF NOT EXISTS dismissed_signals (
+    signal_key TEXT PRIMARY KEY,
+    dismissed_on TEXT  -- ISO date (YYYY-MM-DD) — signal hidden through this date inclusive
+);
+
+CREATE TABLE IF NOT EXISTS linkedin_actors (
+    id TEXT PRIMARY KEY,
+    type TEXT,            -- 'profile' | 'company' | 'group'
+    name TEXT,
+    fetched_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS linkedin_posts (
+    urn TEXT PRIMARY KEY,
+    actor_id TEXT,
+    actor_name TEXT,
+    text TEXT,
+    content_type TEXT,
+    published_at TEXT,
+    reaction_count INTEGER,
+    comment_count INTEGER,
+    share_count INTEGER,
+    impression_count INTEGER,
+    save_count INTEGER,
+    send_count INTEGER,
+    members_reached_count INTEGER,
+    profile_view_count INTEGER,
+    followers_gained_count INTEGER,
+    engagement_rate REAL,
+    word_count INTEGER,
+    fetched_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_linkedin_posts_actor ON linkedin_posts(actor_id);
+CREATE INDEX IF NOT EXISTS idx_linkedin_posts_published ON linkedin_posts(published_at);
 """
 
 
@@ -64,6 +123,29 @@ def connect():
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+    _migrate()
+
+
+def _migrate() -> None:
+    """Add columns to existing tables when the schema evolves.
+
+    SQLite's CREATE TABLE IF NOT EXISTS won't add new columns to an already-existing table,
+    so we explicitly check and ALTER TABLE for newly added columns.
+    """
+    new_contact_cols = {
+        "hs_lead_status": "TEXT",
+        "num_associated_deals": "INTEGER",
+        "notes_last_contacted": "TEXT",
+        "hs_email_last_open_date": "TEXT",
+        "hs_email_last_click_date": "TEXT",
+        "hubspot_owner_id": "TEXT",
+        "hubspot_url": "TEXT",
+    }
+    with connect() as conn:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(contacts)")}
+        for col, col_type in new_contact_cols.items():
+            if col not in existing:
+                conn.execute(f"ALTER TABLE contacts ADD COLUMN {col} {col_type}")
 
 
 def now_iso() -> str:
@@ -89,11 +171,12 @@ def upsert_contacts(rows: list[dict]) -> None:
     if not rows:
         return
     cols = [
-        "id", "email", "firm_type", "lifecyclestage", "createdate",
+        "id", "email", "firm_type", "lifecyclestage", "hs_lead_status", "createdate",
         "recent_conversion_event_name", "first_conversion_event_name",
         "hs_analytics_source", "hs_analytics_source_data_1",
-        "hs_analytics_source_data_2", "num_conversion_events",
-        "company_id", "fetched_at",
+        "hs_analytics_source_data_2", "num_conversion_events", "num_associated_deals",
+        "notes_last_contacted", "hs_email_last_open_date", "hs_email_last_click_date",
+        "hubspot_owner_id", "hubspot_url", "company_id", "fetched_at",
     ]
     placeholders = ", ".join("?" for _ in cols)
     updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
@@ -114,6 +197,111 @@ def upsert_companies(rows: list[dict]) -> None:
     sql = (
         f"INSERT INTO companies ({', '.join(cols)}) VALUES ({placeholders}) "
         f"ON CONFLICT(id) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def upsert_forms(rows: list[dict]) -> None:
+    if not rows:
+        return
+    cols = ["id", "name", "fetched_at"]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+    sql = (
+        f"INSERT INTO forms ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def upsert_form_submissions(rows: list[dict]) -> None:
+    if not rows:
+        return
+    cols = ["conversion_id", "form_id", "contact_email", "submitted_at", "fetched_at"]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "conversion_id")
+    sql = (
+        f"INSERT INTO form_submissions ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(conversion_id) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def delete_contacts_not_in(ids: set[str]) -> int:
+    """Delete contacts in local cache that are NOT in the given set of HubSpot IDs.
+
+    Used after a full refresh to remove contacts that were deleted/archived in HubSpot.
+    Returns the number of rows deleted.
+    """
+    if not ids:
+        return 0
+    with connect() as conn:
+        # SQLite IN clause has limits — chunk if needed (we likely have <10k contacts).
+        placeholders = ",".join("?" for _ in ids)
+        result = conn.execute(
+            f"DELETE FROM contacts WHERE id NOT IN ({placeholders})",
+            tuple(ids),
+        )
+        return result.rowcount
+
+
+def count_contacts() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM contacts").fetchone()
+        return int(row["n"])
+
+
+def dismiss_signal(signal_key: str, dismissed_on: str) -> None:
+    """Mark a signal as dismissed for the given date (YYYY-MM-DD)."""
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO dismissed_signals (signal_key, dismissed_on) VALUES (?, ?) "
+            "ON CONFLICT(signal_key) DO UPDATE SET dismissed_on=excluded.dismissed_on",
+            (signal_key, dismissed_on),
+        )
+
+
+def active_dismissals(today: str) -> set[str]:
+    """Return signal_keys that are dismissed and still hidden as of today (YYYY-MM-DD)."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT signal_key FROM dismissed_signals WHERE dismissed_on >= ?",
+            (today,),
+        ).fetchall()
+    return {r["signal_key"] for r in rows}
+
+
+def upsert_linkedin_actors(rows: list[dict]) -> None:
+    if not rows:
+        return
+    cols = ["id", "type", "name", "fetched_at"]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+    sql = (
+        f"INSERT INTO linkedin_actors ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def upsert_linkedin_posts(rows: list[dict]) -> None:
+    if not rows:
+        return
+    cols = [
+        "urn", "actor_id", "actor_name", "text", "content_type", "published_at",
+        "reaction_count", "comment_count", "share_count", "impression_count",
+        "save_count", "send_count", "members_reached_count", "profile_view_count",
+        "followers_gained_count", "engagement_rate", "word_count", "fetched_at",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "urn")
+    sql = (
+        f"INSERT INTO linkedin_posts ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(urn) DO UPDATE SET {updates}"
     )
     with connect() as conn:
         conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])

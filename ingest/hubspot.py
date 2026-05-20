@@ -20,6 +20,7 @@ CONTACT_PROPS = [
     "email",
     "firm_type",
     "lifecyclestage",
+    "hs_lead_status",
     "createdate",
     "recent_conversion_event_name",
     "first_conversion_event_name",
@@ -27,6 +28,11 @@ CONTACT_PROPS = [
     "hs_analytics_source_data_1",
     "hs_analytics_source_data_2",
     "num_conversion_events",
+    "num_associated_deals",
+    "notes_last_contacted",
+    "hs_email_last_open_date",
+    "hs_email_last_click_date",
+    "hubspot_owner_id",
 ]
 
 COMPANY_PROPS = [
@@ -75,6 +81,44 @@ class HubSpotClient:
                 break
             after = paging["after"]
 
+    def iter_forms(self) -> Iterator[dict]:
+        """Yield all marketing forms (id + name)."""
+        after = None
+        while True:
+            params = {"limit": 100}
+            if after:
+                params["after"] = after
+            data = self._get("/marketing/v3/forms", params=params)
+            for f in data.get("results", []):
+                yield f
+            paging = data.get("paging", {}).get("next")
+            if not paging:
+                break
+            after = paging["after"]
+
+    def iter_form_submissions(self, form_id: str, max_pages: int = 200) -> Iterator[dict]:
+        """Yield all submissions for a given form. Each submission has values[], submittedAt, conversionId."""
+        after = None
+        pages = 0
+        while pages < max_pages:
+            params = {"limit": 50}
+            if after:
+                params["after"] = after
+            try:
+                data = self._get(f"/form-integrations/v1/submissions/forms/{form_id}", params=params)
+            except requests.HTTPError as e:
+                # Some forms (e.g., archived or restricted) may return 404/403 — skip them.
+                if e.response is not None and e.response.status_code in (403, 404):
+                    return
+                raise
+            for s in data.get("results", []):
+                yield s
+            paging = data.get("paging", {}).get("next")
+            if not paging:
+                break
+            after = paging["after"]
+            pages += 1
+
     def iter_companies(self, ids: list[str] | None = None) -> Iterator[dict]:
         """Yield company objects. If ids given, batch-read; else paginate all."""
         if ids:
@@ -115,11 +159,18 @@ def _first_company_id(contact: dict) -> str | None:
     return None
 
 
-def refresh(token: str) -> dict:
-    """Pull everything fresh into SQLite. Returns counts."""
+def refresh(token: str, progress=None) -> dict:
+    """Pull everything fresh into SQLite. Returns counts.
+
+    `progress` is an optional callable(stage: str, current: int, total: int)
+    used by the Streamlit UI to render a progress bar.
+    """
     db.init_db()
     client = HubSpotClient(token)
     fetched_at = db.now_iso()
+
+    if progress:
+        progress("Contacts", 0, 0)
 
     contact_rows: list[dict] = []
     company_ids: set[str] = set()
@@ -133,6 +184,7 @@ def refresh(token: str) -> dict:
             "email": props.get("email"),
             "firm_type": props.get("firm_type"),
             "lifecyclestage": props.get("lifecyclestage"),
+            "hs_lead_status": props.get("hs_lead_status"),
             "createdate": props.get("createdate"),
             "recent_conversion_event_name": props.get("recent_conversion_event_name"),
             "first_conversion_event_name": props.get("first_conversion_event_name"),
@@ -140,11 +192,30 @@ def refresh(token: str) -> dict:
             "hs_analytics_source_data_1": props.get("hs_analytics_source_data_1"),
             "hs_analytics_source_data_2": props.get("hs_analytics_source_data_2"),
             "num_conversion_events": _to_int(props.get("num_conversion_events")),
+            "num_associated_deals": _to_int(props.get("num_associated_deals")),
+            "notes_last_contacted": props.get("notes_last_contacted"),
+            "hs_email_last_open_date": props.get("hs_email_last_open_date"),
+            "hs_email_last_click_date": props.get("hs_email_last_click_date"),
+            "hubspot_owner_id": props.get("hubspot_owner_id"),
+            "hubspot_url": c.get("url"),
             "company_id": company_id,
             "fetched_at": fetched_at,
         })
 
     db.upsert_contacts(contact_rows)
+
+    # Remove contacts that no longer exist in HubSpot (deleted/archived).
+    # Safety: only delete if the new set is >= 50% of the existing — guards
+    # against accidental nukes if the API returned a truncated response.
+    current_ids = {r["id"] for r in contact_rows}
+    existing_n = db.count_contacts()
+    if existing_n == 0 or len(current_ids) >= existing_n * 0.5:
+        deleted = db.delete_contacts_not_in(current_ids)
+        if deleted and progress:
+            progress(f"Removed {deleted} stale contacts", 0, 0)
+
+    if progress:
+        progress("Companies", 0, len(company_ids))
 
     company_rows = []
     for c in client.iter_companies(ids=list(company_ids)):
@@ -158,8 +229,58 @@ def refresh(token: str) -> dict:
         })
     db.upsert_companies(company_rows)
 
+    # Forms + submissions
+    if progress:
+        progress("Forms", 0, 0)
+
+    form_rows: list[dict] = []
+    form_ids: list[str] = []
+    for f in client.iter_forms():
+        form_rows.append({
+            "id": f["id"],
+            "name": f.get("name") or f.get("displayName") or "(unnamed)",
+            "fetched_at": fetched_at,
+        })
+        form_ids.append(f["id"])
+    db.upsert_forms(form_rows)
+
+    sub_rows: list[dict] = []
+    for i, fid in enumerate(form_ids):
+        if progress:
+            progress(f"Submissions ({form_rows[i]['name'][:30]})", i + 1, len(form_ids))
+        for s in client.iter_form_submissions(fid):
+            email = None
+            for kv in s.get("values", []):
+                if kv.get("name") == "email":
+                    email = kv.get("value")
+                    break
+            ts = s.get("submittedAt")
+            sub_rows.append({
+                "conversion_id": s.get("conversionId") or f"{fid}:{ts}:{email}",
+                "form_id": fid,
+                "contact_email": (email or "").lower() or None,
+                "submitted_at": _ms_to_iso(ts),
+                "fetched_at": fetched_at,
+            })
+    db.upsert_form_submissions(sub_rows)
+
     db.set_meta("last_full_refresh", fetched_at)
-    return {"contacts": len(contact_rows), "companies": len(company_rows)}
+    return {
+        "contacts": len(contact_rows),
+        "companies": len(company_rows),
+        "forms": len(form_rows),
+        "submissions": len(sub_rows),
+    }
+
+
+def _ms_to_iso(ms) -> str | None:
+    if ms is None:
+        return None
+    try:
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return None
 
 
 def _to_int(v) -> int | None:

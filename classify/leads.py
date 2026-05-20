@@ -38,10 +38,11 @@ COMPANY_FIRM_TYPE_TO_CATEGORY = {
 }
 
 # Contact.firm_type label values (the property uses display labels as values).
+# As of 2026-05: Press/PR added; Fintech Vendor and "Invite team members" cleaned up.
 CONTACT_FIRM_TYPE_TO_CATEGORY = {
     "RIA": "RIA",
     "Fintech": "Fintech",
-    "Fintech Vendor": "Fintech",
+    "Fintech Vendor": "Fintech",   # kept for legacy contacts that may still carry this value
     "Bank/Trust": "Bank/Trust",
     "Custodian": "Custodian",
     "Insurance": "Insurance",
@@ -56,7 +57,8 @@ COMPANY_NON_LEAD = {
 }
 CONTACT_NON_LEAD = {
     "Consultant", "Other", "Research", "Private Equity/VC", "Recruiter",
-    "Invite team members",
+    "Press/PR",
+    "Invite team members",  # legacy stray UI value, kept for safety
 }
 
 Status = Literal["lead", "non_lead", "unclassified"]
@@ -69,16 +71,26 @@ class Classification:
     source: str           # "company" | "contact" | "none"
 
 
-def classify_row(contact_firm_type: str | None, company_firm_type: str | None) -> Classification:
+def _norm(v) -> str:
+    """Normalize a possibly-NaN/None/float value to a stripped string."""
+    if v is None:
+        return ""
+    # pandas NaN is a float that isn't equal to itself
+    if isinstance(v, float) and v != v:
+        return ""
+    return str(v).strip()
+
+
+def classify_row(contact_firm_type, company_firm_type) -> Classification:
     # Prefer company classification.
-    cft = (company_firm_type or "").strip().lower()
+    cft = _norm(company_firm_type).lower()
     if cft and cft in COMPANY_FIRM_TYPE_TO_CATEGORY:
         return Classification("lead", COMPANY_FIRM_TYPE_TO_CATEGORY[cft], "company")
     if cft and cft in COMPANY_NON_LEAD:
         return Classification("non_lead", cft, "company")
 
     # Fall back to contact-level (label-as-value).
-    ct = (contact_firm_type or "").strip()
+    ct = _norm(contact_firm_type)
     if ct and ct in CONTACT_FIRM_TYPE_TO_CATEGORY:
         return Classification("lead", CONTACT_FIRM_TYPE_TO_CATEGORY[ct], "contact")
     if ct and ct in CONTACT_NON_LEAD:
