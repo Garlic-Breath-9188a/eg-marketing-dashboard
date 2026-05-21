@@ -8,7 +8,7 @@ import plotly.express as px
 import streamlit as st
 
 from classify.leads import LEAD_CATEGORIES, classify_dataframe
-from ingest import authoredup, hubspot
+from ingest import authoredup, hubspot, wordpress
 from store import db
 
 st.set_page_config(
@@ -115,6 +115,34 @@ def load_linkedin_posts() -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=3600)
+def load_deals() -> pd.DataFrame:
+    db.init_db()
+    with db.connect() as conn:
+        try:
+            df = pd.read_sql("SELECT * FROM deals", conn)
+        except Exception:
+            return pd.DataFrame()
+    for col in ("closedate", "createdate"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_tasks() -> pd.DataFrame:
+    db.init_db()
+    with db.connect() as conn:
+        try:
+            df = pd.read_sql("SELECT * FROM tasks", conn)
+        except Exception:
+            return pd.DataFrame()
+    for col in ("due_at", "completed_at"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+    return df
+
+
 def refresh_from_hubspot():
     token = st.secrets.get("HUBSPOT_TOKEN", "")
     if not token:
@@ -130,15 +158,24 @@ def refresh_from_hubspot():
     result = hubspot.refresh(token, progress=_progress)
     status.empty()
     bar.empty()
+    deals_n = result.get("deals", 0)
+    tasks_n = result.get("tasks", 0)
+    extra = ""
+    if deals_n or tasks_n:
+        extra = f", {deals_n} deals, {tasks_n} tasks"
+    else:
+        extra = " (deals/tasks: 0 — add crm.objects.deals.read scope to Service Key to enable)"
     st.success(
         f"Refreshed: {result['contacts']} contacts, {result['companies']} companies, "
-        f"{result['forms']} forms, {result['submissions']} submissions."
+        f"{result['forms']} forms, {result['submissions']} submissions{extra}."
     )
     load_contacts.clear()
     load_companies.clear()
     load_forms.clear()
     load_form_submissions.clear()
     load_linkedin_posts.clear()
+    load_deals.clear()
+    load_tasks.clear()
 
 
 def refresh_from_authoredup():
@@ -162,6 +199,32 @@ def refresh_from_authoredup():
     load_linkedin_posts.clear()
 
 
+def refresh_from_wordpress():
+    base_url = st.secrets.get("WORDPRESS_BASE_URL", "")
+    if not base_url:
+        st.error(
+            "WORDPRESS_BASE_URL not configured in secrets. "
+            "Add WORDPRESS_BASE_URL (and optionally WORDPRESS_USER/WORDPRESS_APP_PASSWORD + WPCOM_API_TOKEN/WPCOM_SITE) to `.streamlit/secrets.toml`."
+        )
+        return
+    status = st.empty()
+
+    def _progress(stage, current, total):
+        status.text(f"{stage}…")
+
+    try:
+        result = wordpress.refresh(dict(st.secrets), progress=_progress)
+    except Exception as e:
+        status.empty()
+        st.error(f"WordPress refresh failed: {e}")
+        return
+    status.empty()
+    if result.get("error"):
+        st.error(result["error"])
+    else:
+        st.success(f"WordPress refreshed: {result.get('posts', 0)} posts.")
+
+
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
@@ -179,6 +242,11 @@ with st.sidebar:
         st.caption(f"LinkedIn refresh: {last_linkedin}")
     if st.button("💼 Refresh from AuthoredUp"):
         refresh_from_authoredup()
+    last_wp = db.get_meta("last_wordpress_refresh")
+    if last_wp:
+        st.caption(f"WordPress refresh: {last_wp}")
+    if st.button("📰 Refresh from WordPress"):
+        refresh_from_wordpress()
 
     st.markdown("---")
     st.markdown("### Date range")
@@ -294,9 +362,9 @@ email_to_category = classified_with_email.set_index("email_lc")["lead_category"]
 
 
 def _per_form_aggregate(subs: pd.DataFrame, forms: pd.DataFrame) -> pd.DataFrame:
-    """For each form: submissions, unique people, leads (among unique people)."""
+    """For each form: submissions, leads (among unique submitters), lead %."""
     if subs.empty or forms.empty:
-        return pd.DataFrame(columns=["Form", "Subs", "People", "Leads", "%"])
+        return pd.DataFrame(columns=["Form", "Subs", "Leads", "%"])
     rows = []
     name_lookup = forms.set_index("id")["name"].to_dict()
     for fid, group in subs.groupby("form_id"):
@@ -304,7 +372,7 @@ def _per_form_aggregate(subs: pd.DataFrame, forms: pd.DataFrame) -> pd.DataFrame
         n_people = len(people)
         n_subs = len(group)
         n_leads = sum(1 for e in people if email_to_status.get(e) == "lead")
-        # Strip year prefix to save horizontal space (we're already filtered by year).
+        # Strip year prefix to save horizontal space.
         raw_name = name_lookup.get(fid, fid)
         display_name = raw_name
         for prefix in ("2026 ", "2025 ", "2024 "):
@@ -314,7 +382,6 @@ def _per_form_aggregate(subs: pd.DataFrame, forms: pd.DataFrame) -> pd.DataFrame
         rows.append({
             "Form": display_name,
             "Subs": n_subs,
-            "People": n_people,
             "Leads": n_leads,
             "%": (n_leads / n_people * 100) if n_people else 0.0,
         })
@@ -347,12 +414,56 @@ n_non_lead = int((in_period["lead_status"] == "non_lead").sum())
 n_submissions = int(len(subs_in_period))
 n_unique_fillers = int(subs_in_period["contact_email"].dropna().nunique()) if not subs_in_period.empty else 0
 
+# Per-category lead counts for the priority segments
+n_ria = int((in_period["lead_category"] == "RIA").sum())
+n_bd = int((in_period["lead_category"] == "Broker-Dealer").sum())
+
 # Prior-period counterparts
 p_contacts = len(in_prior_period)
 p_leads = int((in_prior_period["lead_status"] == "lead").sum())
 p_unclassified = int((in_prior_period["lead_status"] == "unclassified").sum())
 p_non_lead = int((in_prior_period["lead_status"] == "non_lead").sum())
 p_submissions = int(len(subs_in_prior))
+p_ria = int((in_prior_period["lead_category"] == "RIA").sum())
+p_bd = int((in_prior_period["lead_category"] == "Broker-Dealer").sum())
+
+# Load deals + tasks for the deal-pipeline KPIs
+deals_df = load_deals()
+tasks_df = load_tasks()
+
+# Compute open deals and tasks due this week
+CLOSED_STAGES = {"closedwon", "closedlost"}
+if not deals_df.empty and "dealstage" in deals_df.columns:
+    open_deals = deals_df[~deals_df["dealstage"].fillna("").str.lower().isin(CLOSED_STAGES)].copy()
+else:
+    open_deals = pd.DataFrame()
+
+week_cutoff = now_ts + pd.Timedelta(days=7)
+if not tasks_df.empty and "due_at" in tasks_df.columns:
+    tasks_due_week = tasks_df[
+        (tasks_df["due_at"] >= now_ts)
+        & (tasks_df["due_at"] < week_cutoff)
+        & (~tasks_df["status"].fillna("").str.upper().isin({"COMPLETED", "DEFERRED"}))
+    ].copy()
+else:
+    tasks_due_week = pd.DataFrame()
+
+# Open deals that have at least one task due this week
+if not open_deals.empty and not tasks_due_week.empty:
+    # Build a set of deal IDs referenced by due tasks
+    due_deal_ids = set()
+    for ids_str in tasks_due_week["associated_deal_ids"].dropna():
+        if ids_str:
+            for did in str(ids_str).split(","):
+                did = did.strip()
+                if did:
+                    due_deal_ids.add(did)
+    open_deals_with_due_tasks = open_deals[open_deals["id"].astype(str).isin(due_deal_ids)]
+    n_deals_due = len(open_deals_with_due_tasks)
+else:
+    n_deals_due = 0
+
+n_tasks_due = len(tasks_due_week)
 
 
 # If the prior comparison window falls before the trusted-data date, deltas are
@@ -971,23 +1082,47 @@ with st.expander("What each signal means"):
 
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Leads", f"{n_leads:,}", delta=_fmt_delta(n_leads, p_leads))
+c1.metric(
+    "RIA leads",
+    f"{n_ria:,}",
+    delta=_fmt_delta(n_ria, p_ria),
+    help="ICP RIA contacts created in the selected period. Priority segment.",
+)
 c2.metric(
-    "Form submissions",
-    f"{n_submissions:,}",
-    delta=_fmt_delta(n_submissions, p_submissions),
-    help=f"Total submissions across {len(forms_df)} forms ({form_year_filter}). "
-         f"{n_unique_fillers} unique people in current period.",
+    "Broker-Dealer leads",
+    f"{n_bd:,}",
+    delta=_fmt_delta(n_bd, p_bd),
+    help="ICP Broker-Dealer contacts created in the selected period. Priority segment.",
 )
-c3.metric("Total contacts", f"{n_contacts:,}", delta=_fmt_delta(n_contacts, p_contacts))
+c3.metric(
+    "Total leads",
+    f"{n_leads:,}",
+    delta=_fmt_delta(n_leads, p_leads),
+    help="All ICP contacts in the selected period (all 7 firm-type categories).",
+)
 c4.metric(
-    "Unclassified backlog",
-    f"{n_unclassified:,}",
-    delta=_fmt_delta(n_unclassified, p_unclassified),
-    delta_color="inverse",
-    help="Contacts with no firm_type on Contact or Company. Backlog growth is BAD — red means it grew vs. prior period. See Backlog page for cleanup list.",
+    "Open deals · tasks due 7d",
+    f"{n_deals_due:,}",
+    delta=f"of {len(open_deals)} open" if not open_deals.empty else "no deal data",
+    delta_color="off",
+    help="Open deals that have at least one task due in the next 7 days. Requires crm.objects.deals.read scope on the HubSpot Service Key.",
 )
-c5.metric("Non-ICP", f"{n_non_lead:,}", delta=_fmt_delta(n_non_lead, p_non_lead), delta_color="off")
+c5.metric(
+    "Tasks due 7d",
+    f"{n_tasks_due:,}",
+    help="Total tasks due in the next 7 days (across all deals). Requires crm.objects.tasks.read scope.",
+)
+
+# Secondary operational row (less critical, kept for visibility)
+with st.expander("📋 Operational counts (backlog, total contacts, non-ICP, form fills)"):
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric("Unclassified backlog", f"{n_unclassified:,}",
+               delta=_fmt_delta(n_unclassified, p_unclassified), delta_color="inverse",
+               help="Contacts with no firm_type set on either record. See Backlog page.")
+    sc2.metric("Total contacts", f"{n_contacts:,}", delta=_fmt_delta(n_contacts, p_contacts))
+    sc3.metric("Non-ICP", f"{n_non_lead:,}", delta=_fmt_delta(n_non_lead, p_non_lead), delta_color="off")
+    sc4.metric("Form submissions", f"{n_submissions:,}", delta=_fmt_delta(n_submissions, p_submissions),
+               help=f"{n_unique_fillers} unique people across {len(forms_df)} forms.")
 
 # ---- Featured form spotlights (real form-submission data) ----
 ai = _spotlight_for(subs_in_period, forms_df, "ai notetaker")
@@ -1097,7 +1232,6 @@ with right:
             column_config={
                 "Form": st.column_config.TextColumn(width="medium"),
                 "Subs": st.column_config.NumberColumn(width="small"),
-                "People": st.column_config.NumberColumn(width="small"),
                 "Leads": st.column_config.NumberColumn(width="small"),
                 "%": st.column_config.NumberColumn(format="%.0f%%", width="small"),
             },

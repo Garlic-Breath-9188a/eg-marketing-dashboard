@@ -106,6 +106,62 @@ CREATE TABLE IF NOT EXISTS linkedin_posts (
 
 CREATE INDEX IF NOT EXISTS idx_linkedin_posts_actor ON linkedin_posts(actor_id);
 CREATE INDEX IF NOT EXISTS idx_linkedin_posts_published ON linkedin_posts(published_at);
+
+CREATE TABLE IF NOT EXISTS deals (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    amount REAL,
+    dealstage TEXT,
+    pipeline TEXT,
+    closedate TEXT,
+    createdate TEXT,
+    hubspot_owner_id TEXT,
+    primary_contact_id TEXT,
+    primary_company_id TEXT,
+    hubspot_url TEXT,
+    fetched_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_deals_stage ON deals(dealstage);
+CREATE INDEX IF NOT EXISTS idx_deals_owner ON deals(hubspot_owner_id);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    subject TEXT,
+    status TEXT,
+    priority TEXT,
+    task_type TEXT,
+    due_at TEXT,
+    completed_at TEXT,
+    hubspot_owner_id TEXT,
+    associated_deal_ids TEXT,      -- comma-separated
+    associated_contact_ids TEXT,   -- comma-separated
+    fetched_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+
+CREATE TABLE IF NOT EXISTS wordpress_posts (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    slug TEXT,
+    url TEXT,
+    status TEXT,
+    published_at TEXT,
+    modified_at TEXT,
+    author_id TEXT,
+    author_name TEXT,
+    categories TEXT,  -- comma-separated names
+    tags TEXT,         -- comma-separated names
+    excerpt TEXT,
+    word_count INTEGER,
+    views_30d INTEGER,
+    views_all_time INTEGER,
+    fetched_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_wp_published ON wordpress_posts(published_at);
 """
 
 
@@ -302,6 +358,59 @@ def upsert_linkedin_posts(rows: list[dict]) -> None:
     sql = (
         f"INSERT INTO linkedin_posts ({', '.join(cols)}) VALUES ({placeholders}) "
         f"ON CONFLICT(urn) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def upsert_deals(rows: list[dict]) -> None:
+    if not rows:
+        return
+    cols = [
+        "id", "name", "amount", "dealstage", "pipeline", "closedate", "createdate",
+        "hubspot_owner_id", "primary_contact_id", "primary_company_id", "hubspot_url",
+        "fetched_at",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+    sql = (
+        f"INSERT INTO deals ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def upsert_tasks(rows: list[dict]) -> None:
+    if not rows:
+        return
+    cols = [
+        "id", "subject", "status", "priority", "task_type", "due_at", "completed_at",
+        "hubspot_owner_id", "associated_deal_ids", "associated_contact_ids", "fetched_at",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+    sql = (
+        f"INSERT INTO tasks ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def upsert_wordpress_posts(rows: list[dict]) -> None:
+    if not rows:
+        return
+    cols = [
+        "id", "title", "slug", "url", "status", "published_at", "modified_at",
+        "author_id", "author_name", "categories", "tags", "excerpt", "word_count",
+        "views_30d", "views_all_time", "fetched_at",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+    sql = (
+        f"INSERT INTO wordpress_posts ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {updates}"
     )
     with connect() as conn:
         conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])

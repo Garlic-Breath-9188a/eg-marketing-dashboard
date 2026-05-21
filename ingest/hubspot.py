@@ -41,6 +41,26 @@ COMPANY_PROPS = [
     "firm_type",
 ]
 
+DEAL_PROPS = [
+    "dealname",
+    "amount",
+    "dealstage",
+    "pipeline",
+    "closedate",
+    "createdate",
+    "hubspot_owner_id",
+]
+
+TASK_PROPS = [
+    "hs_task_subject",
+    "hs_task_status",
+    "hs_task_priority",
+    "hs_task_type",
+    "hs_timestamp",
+    "hs_task_completion_date",
+    "hubspot_owner_id",
+]
+
 
 class HubSpotClient:
     def __init__(self, token: str):
@@ -118,6 +138,55 @@ class HubSpotClient:
                 break
             after = paging["after"]
             pages += 1
+
+    def iter_deals(self) -> Iterator[dict]:
+        """Yield raw deal objects with contact + company associations."""
+        after = None
+        while True:
+            params = {
+                "limit": 100,
+                "properties": ",".join(DEAL_PROPS),
+                "associations": "contacts,companies",
+            }
+            if after:
+                params["after"] = after
+            try:
+                data = self._get("/crm/v3/objects/deals", params=params)
+            except requests.HTTPError as e:
+                # Missing scope returns 403 — degrade gracefully
+                if e.response is not None and e.response.status_code in (401, 403):
+                    return
+                raise
+            for d in data.get("results", []):
+                yield d
+            paging = data.get("paging", {}).get("next")
+            if not paging:
+                break
+            after = paging["after"]
+
+    def iter_tasks(self) -> Iterator[dict]:
+        """Yield raw task objects with deal + contact associations."""
+        after = None
+        while True:
+            params = {
+                "limit": 100,
+                "properties": ",".join(TASK_PROPS),
+                "associations": "deals,contacts",
+            }
+            if after:
+                params["after"] = after
+            try:
+                data = self._get("/crm/v3/objects/tasks", params=params)
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code in (401, 403):
+                    return
+                raise
+            for t in data.get("results", []):
+                yield t
+            paging = data.get("paging", {}).get("next")
+            if not paging:
+                break
+            after = paging["after"]
 
     def iter_companies(self, ids: list[str] | None = None) -> Iterator[dict]:
         """Yield company objects. If ids given, batch-read; else paginate all."""
@@ -264,13 +333,73 @@ def refresh(token: str, progress=None) -> dict:
             })
     db.upsert_form_submissions(sub_rows)
 
+    # Deals (requires crm.objects.deals.read scope — degrades gracefully if missing)
+    if progress:
+        progress("Deals", 0, 0)
+    deal_rows: list[dict] = []
+    for d in client.iter_deals():
+        props = d.get("properties", {})
+        assoc = d.get("associations", {}) or {}
+        contacts_assoc = assoc.get("contacts", {}).get("results", [])
+        companies_assoc = assoc.get("companies", {}).get("results", [])
+        deal_rows.append({
+            "id": d["id"],
+            "name": props.get("dealname"),
+            "amount": _to_float(props.get("amount")),
+            "dealstage": props.get("dealstage"),
+            "pipeline": props.get("pipeline"),
+            "closedate": props.get("closedate"),
+            "createdate": props.get("createdate"),
+            "hubspot_owner_id": props.get("hubspot_owner_id"),
+            "primary_contact_id": contacts_assoc[0].get("id") if contacts_assoc else None,
+            "primary_company_id": companies_assoc[0].get("id") if companies_assoc else None,
+            "hubspot_url": d.get("url"),
+            "fetched_at": fetched_at,
+        })
+    db.upsert_deals(deal_rows)
+
+    # Tasks (requires crm.objects.tasks.read or engagements scope)
+    if progress:
+        progress("Tasks", 0, 0)
+    task_rows: list[dict] = []
+    for t in client.iter_tasks():
+        props = t.get("properties", {})
+        assoc = t.get("associations", {}) or {}
+        deals_assoc = [d.get("id") for d in assoc.get("deals", {}).get("results", []) if d.get("id")]
+        contacts_assoc = [c.get("id") for c in assoc.get("contacts", {}).get("results", []) if c.get("id")]
+        task_rows.append({
+            "id": t["id"],
+            "subject": props.get("hs_task_subject"),
+            "status": props.get("hs_task_status"),
+            "priority": props.get("hs_task_priority"),
+            "task_type": props.get("hs_task_type"),
+            "due_at": _ms_to_iso(props.get("hs_timestamp")) or props.get("hs_timestamp"),
+            "completed_at": props.get("hs_task_completion_date"),
+            "hubspot_owner_id": props.get("hubspot_owner_id"),
+            "associated_deal_ids": ",".join(deals_assoc) if deals_assoc else None,
+            "associated_contact_ids": ",".join(contacts_assoc) if contacts_assoc else None,
+            "fetched_at": fetched_at,
+        })
+    db.upsert_tasks(task_rows)
+
     db.set_meta("last_full_refresh", fetched_at)
     return {
         "contacts": len(contact_rows),
         "companies": len(company_rows),
         "forms": len(form_rows),
         "submissions": len(sub_rows),
+        "deals": len(deal_rows),
+        "tasks": len(task_rows),
     }
+
+
+def _to_float(v) -> float | None:
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _ms_to_iso(ms) -> str | None:
