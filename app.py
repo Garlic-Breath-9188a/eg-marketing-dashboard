@@ -305,6 +305,7 @@ if contacts.empty:
 
 classified = classify_dataframe(contacts, companies)
 
+now_ts = pd.Timestamp.now(tz="UTC")
 start_ts = pd.Timestamp(start_date, tz="UTC")
 end_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
 in_period = classified[
@@ -486,7 +487,6 @@ def _fmt_delta(current: float, prior: float) -> str | None:
 
 # ---- CRO-style aggregates: Hot Accounts ----
 HEAT_WINDOW_DAYS = 30  # rolling window for "engaged recently"
-now_ts = pd.Timestamp.now(tz="UTC")
 heat_cutoff = now_ts - pd.Timedelta(days=HEAT_WINDOW_DAYS)
 
 # Outreach-eligible firm types for the consulting business. Tighter than the broader
