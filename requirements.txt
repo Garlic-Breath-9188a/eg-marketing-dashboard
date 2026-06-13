@@ -1,5 +1,8 @@
-streamlit>=1.32
-requests>=2.31
-pandas>=2.2
-plotly>=5.20
-python-dateutil>=2.9
+# Pinned to the major versions verified working on 2026-06-13 (Python 3.12).
+# Lower bound = what we tested; upper bound guards against the next major
+# (e.g. pandas 4 / streamlit 2) silently breaking the deployed app.
+streamlit>=1.58,<2
+requests>=2.31,<3
+pandas>=3.0,<4
+plotly>=6.0,<7
+python-dateutil>=2.9,<3

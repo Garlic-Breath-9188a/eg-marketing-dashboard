@@ -139,6 +139,42 @@ class HubSpotClient:
             after = paging["after"]
             pages += 1
 
+    def get_deal_stage_metadata(self) -> dict:
+        """Return {stage_id: {is_closed, is_won, label, pipeline_id}} for all deal pipelines.
+
+        HubSpot deal stages use opaque per-portal IDs (numeric for custom pipelines,
+        word-ish for the default one). The only reliable way to know whether a stage
+        means "closed" is the stage's metadata.isClosed flag — hardcoding "closedwon"/
+        "closedlost" only works for the default pipeline. probability == 1.0 → won.
+
+        Degrades to {} if the pipelines scope is missing (401/403), in which case the
+        caller stores NULL stage flags and the dashboard falls back to the legacy filter.
+        """
+        try:
+            data = self._get("/crm/v3/pipelines/deals")
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code in (401, 403):
+                return {}
+            raise
+        out: dict[str, dict] = {}
+        for pipe in data.get("results", []):
+            pid = pipe.get("id")
+            for stage in pipe.get("stages", []):
+                sid = stage.get("id")
+                if not sid:
+                    continue
+                md = stage.get("metadata", {}) or {}
+                is_closed = str(md.get("isClosed", "")).lower() == "true"
+                prob = _to_float(md.get("probability"))
+                is_won = bool(is_closed and prob is not None and prob >= 1.0)
+                out[sid] = {
+                    "is_closed": is_closed,
+                    "is_won": is_won,
+                    "label": stage.get("label"),
+                    "pipeline_id": pid,
+                }
+        return out
+
     def iter_deals(self) -> Iterator[dict]:
         """Yield raw deal objects with contact + company associations."""
         after = None
@@ -336,17 +372,28 @@ def refresh(token: str, progress=None) -> dict:
     # Deals (requires crm.objects.deals.read scope — degrades gracefully if missing)
     if progress:
         progress("Deals", 0, 0)
+    # Resolve which stages mean "closed" for THIS portal (handles custom pipelines).
+    stage_meta = client.get_deal_stage_metadata()
     deal_rows: list[dict] = []
     for d in client.iter_deals():
         props = d.get("properties", {})
         assoc = d.get("associations", {}) or {}
         contacts_assoc = assoc.get("contacts", {}).get("results", [])
         companies_assoc = assoc.get("companies", {}).get("results", [])
+        ds = props.get("dealstage")
+        if stage_meta:
+            sm = stage_meta.get(ds) or {}
+            stage_is_closed = 1 if sm.get("is_closed") else 0
+            stage_is_won = 1 if sm.get("is_won") else 0
+            stage_label = sm.get("label")
+        else:
+            # No stage metadata available — leave NULL so the dashboard falls back.
+            stage_is_closed = stage_is_won = stage_label = None
         deal_rows.append({
             "id": d["id"],
             "name": props.get("dealname"),
             "amount": _to_float(props.get("amount")),
-            "dealstage": props.get("dealstage"),
+            "dealstage": ds,
             "pipeline": props.get("pipeline"),
             "closedate": props.get("closedate"),
             "createdate": props.get("createdate"),
@@ -354,6 +401,9 @@ def refresh(token: str, progress=None) -> dict:
             "primary_contact_id": contacts_assoc[0].get("id") if contacts_assoc else None,
             "primary_company_id": companies_assoc[0].get("id") if companies_assoc else None,
             "hubspot_url": d.get("url"),
+            "stage_is_closed": stage_is_closed,
+            "stage_is_won": stage_is_won,
+            "stage_label": stage_label,
             "fetched_at": fetched_at,
         })
     db.upsert_deals(deal_rows)

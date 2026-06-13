@@ -126,6 +126,10 @@ def load_deals() -> pd.DataFrame:
     for col in ("closedate", "createdate"):
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+    # Ensure stage-metadata columns exist even if cached load predates the migration.
+    for col in ("stage_is_closed", "stage_is_won", "stage_label"):
+        if col not in df.columns:
+            df[col] = None
     return df
 
 
@@ -432,9 +436,17 @@ p_bd = int((in_prior_period["lead_category"] == "Broker-Dealer").sum())
 deals_df = load_deals()
 tasks_df = load_tasks()
 
-# Compute open deals and tasks due this week
+# Compute open deals and tasks due this week.
+# Stages use per-portal IDs (custom pipelines have numeric ids), so we rely on the
+# stage_is_closed flag resolved from HubSpot's pipeline metadata at ingest time.
+# Legacy fallback: caches refreshed before that flag existed have all-NULL
+# stage_is_closed — fall back to the default-pipeline literal stage names.
 CLOSED_STAGES = {"closedwon", "closedlost"}
-if not deals_df.empty and "dealstage" in deals_df.columns:
+if deals_df.empty:
+    open_deals = pd.DataFrame()
+elif deals_df["stage_is_closed"].notna().any():
+    open_deals = deals_df[deals_df["stage_is_closed"].fillna(0).astype(int) == 0].copy()
+elif "dealstage" in deals_df.columns:
     open_deals = deals_df[~deals_df["dealstage"].fillna("").str.lower().isin(CLOSED_STAGES)].copy()
 else:
     open_deals = pd.DataFrame()

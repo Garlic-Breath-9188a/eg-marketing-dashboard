@@ -1,6 +1,6 @@
 # STATUS — EG Marketing Dashboard
 
-Last updated: 2026-05-21
+Last updated: 2026-06-13
 
 ## Where things live
 
@@ -48,7 +48,8 @@ Each signal has a dismiss checkbox; dismissals expire end-of-day.
 - **Pre-Feb 2026 data is suppressed** in period-over-period deltas (HubSpot adoption was Feb 2026). Adjustable via sidebar "Trust data from" date.
 - **LinkedIn share / impression / reach metrics are NULL** from AuthoredUp — LinkedIn API restriction, not a bug. Reactions + comments + engagement rate are reliable.
 - **Jetpack/WordPress.com Stats not connected** — Content page shows post metadata only. To add view counts: get `WPCOM_API_TOKEN` from [developer.wordpress.com/apps](https://developer.wordpress.com/apps).
-- **Deals/tasks scopes added** to Service Key (verify via refresh banner). If tasks count is 0, the `crm.objects.tasks.read` scope may not be added yet.
+- **Deals/tasks scopes confirmed working** (2026-06-13 refresh: 718 deals, 440 tasks). If tasks count is 0, the `crm.objects.tasks.read` scope may not be added yet.
+- **Open-deals KPI** now derives "closed" from HubSpot pipeline-stage `isClosed` metadata (pulled at ingest), not hardcoded `closedwon`/`closedlost` literals — the portal uses custom numeric stage IDs across 3 pipelines, so the old literal filter counted every deal as open.
 
 ## Setting up on a new machine (Mac mini handoff)
 
@@ -148,6 +149,9 @@ Edit these in `app.py` directly as new internal/vendor/partner contacts surface.
 | 2026-05-21 | Headline KPIs swapped to RIA / BD / Total leads / Open deals · tasks due / Tasks due | Form submissions + Total contacts moved to operational expander |
 | 2026-05-21 | Deployed to Streamlit Cloud | `eg-marketing.streamlit.app` |
 | 2026-05-21 | Added WordPress + Content tab | WealthTechToday integration |
+| 2026-06-13 | Fixed open-deals KPI to use pipeline-stage `isClosed` metadata | Portal uses custom numeric stage IDs; old `closedwon`/`closedlost` literals matched nothing → all 718 deals shown as open (now 46 open / 672 closed) |
+| 2026-06-13 | Pinned `requirements.txt` to verified majors | pandas 3.0 / streamlit 1.58 verified working; upper bounds guard against next-major drift |
+| 2026-06-13 | Local venv must be built on Homebrew `python3.12` | Original venv's Python 3.12.0 framework was removed from the Mac, breaking it; system python3 is 3.9 (too old) |
 
 ## Open items / next session ideas
 

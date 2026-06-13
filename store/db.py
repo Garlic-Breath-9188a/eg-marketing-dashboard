@@ -119,6 +119,9 @@ CREATE TABLE IF NOT EXISTS deals (
     primary_contact_id TEXT,
     primary_company_id TEXT,
     hubspot_url TEXT,
+    stage_is_closed INTEGER,
+    stage_is_won INTEGER,
+    stage_label TEXT,
     fetched_at TEXT
 );
 
@@ -197,11 +200,20 @@ def _migrate() -> None:
         "hubspot_owner_id": "TEXT",
         "hubspot_url": "TEXT",
     }
+    new_deal_cols = {
+        "stage_is_closed": "INTEGER",
+        "stage_is_won": "INTEGER",
+        "stage_label": "TEXT",
+    }
     with connect() as conn:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(contacts)")}
         for col, col_type in new_contact_cols.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE contacts ADD COLUMN {col} {col_type}")
+        existing_deal_cols = {row["name"] for row in conn.execute("PRAGMA table_info(deals)")}
+        for col, col_type in new_deal_cols.items():
+            if col not in existing_deal_cols:
+                conn.execute(f"ALTER TABLE deals ADD COLUMN {col} {col_type}")
 
 
 def now_iso() -> str:
@@ -369,6 +381,7 @@ def upsert_deals(rows: list[dict]) -> None:
     cols = [
         "id", "name", "amount", "dealstage", "pipeline", "closedate", "createdate",
         "hubspot_owner_id", "primary_contact_id", "primary_company_id", "hubspot_url",
+        "stage_is_closed", "stage_is_won", "stage_label",
         "fetched_at",
     ]
     placeholders = ", ".join("?" for _ in cols)
