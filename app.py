@@ -1,10 +1,9 @@
-"""EG Marketing Dashboard — main entry / Overview page."""
+"""EG Marketing Dashboard — main entry / Command Center page."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
 from classify.leads import LEAD_CATEGORIES, classify_dataframe
@@ -29,6 +28,7 @@ st.markdown(
       h1 { font-size: 1.6rem !important; padding-top: 0.5rem !important; margin-bottom: 0.5rem !important; line-height: 1.3 !important; }
       h2 { font-size: 1.15rem !important; padding-top: 0.5rem !important; }
       h3 { font-size: 1rem !important; }
+      h4 { font-size: 0.95rem !important; padding-top: 0.4rem !important; margin-bottom: 0.3rem !important; }
       hr { margin: 0.5rem 0 !important; }
       div[data-testid="stHorizontalBlock"] { gap: 0.5rem; }
     </style>
@@ -267,19 +267,11 @@ with st.sidebar:
         start_date, end_date = default_start, today
 
     st.markdown("---")
-    st.markdown("### Forms")
-    form_year_filter = st.selectbox(
-        "Show forms",
-        options=["2026 only", "2025 only", "All years"],
-        index=0,
-    )
-
-    st.markdown("---")
     st.markdown("### Data trust")
     trusted_from = st.date_input(
         "Trust data from",
         value=datetime(2026, 2, 1).date(),
-        help="HubSpot was adopted in Feb 2026. Period-over-period comparisons (deltas, signals) are suppressed when the prior comparison window falls before this date.",
+        help="HubSpot was adopted in Feb 2026. Period-over-period comparisons (deltas) are suppressed when the prior comparison window falls before this date.",
     )
 
     st.markdown("---")
@@ -290,235 +282,104 @@ with st.sidebar:
     )
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-st.title("📊 Marketing Overview")
+# ===========================================================================
+# Marketing Command Center — exception-based, deal-focused Overview
+# ===========================================================================
+ASANA_STRATEGY_URL = "https://app.asana.com/1/1182309086818187/project/1214458328037729"
+ASANA_STRATEGY_NAME = "90-Day Marketing Demand Generation Plan"
+
+# Constructed HubSpot record URLs. Contacts/companies/deals don't return a record
+# URL from the v3 API, so we build the /_/ shortcut links (HubSpot resolves the
+# active portal). Override the base via the HUBSPOT_PORTAL_BASE secret if needed.
+HUBSPOT_PORTAL_BASE = st.secrets.get("HUBSPOT_PORTAL_BASE", "https://app.hubspot.com")
+
+
+def _contact_url(cid) -> str | None:
+    return f"{HUBSPOT_PORTAL_BASE}/contacts/_/contact/{cid}" if cid else None
+
+
+def _company_url(cid) -> str | None:
+    return f"{HUBSPOT_PORTAL_BASE}/contacts/_/company/{cid}" if cid else None
+
+
+def _deal_url(deal_id, stored_url=None) -> str | None:
+    if stored_url:
+        return stored_url
+    return f"{HUBSPOT_PORTAL_BASE}/contacts/_/deal/{deal_id}" if deal_id else None
+
+
+# ---- Header: title + Asana strategy link ----
+head_l, head_r = st.columns([0.68, 0.32])
+with head_l:
+    st.title("📊 Marketing Command Center")
+with head_r:
+    st.markdown(
+        f"<div style='text-align:right; padding-top:1.5rem;'>"
+        f"<a href='{ASANA_STRATEGY_URL}' target='_blank' "
+        f"style='display:inline-block; padding:0.45rem 0.9rem; border-radius:6px; "
+        f"background:#796eff; color:#fff; font-size:0.85rem; font-weight:600; text-decoration:none;'>"
+        f"🎯 90-Day Marketing Strategy ↗</a></div>",
+        unsafe_allow_html=True,
+    )
+
 _period_days = (end_date - start_date).days + 1
 st.caption(
-    f"Period: **{start_date.strftime('%b %d, %Y')} – {end_date.strftime('%b %d, %Y')}** ({_period_days} days). "
-    "Change in the sidebar."
+    f"Period: **{start_date.strftime('%b %d, %Y')} – {end_date.strftime('%b %d, %Y')}** "
+    f"({_period_days} days). Change in the sidebar · strategy tracked in Asana: *{ASANA_STRATEGY_NAME}*."
 )
 
+# ---- Load + classify ----
 contacts = load_contacts()
 companies = load_companies()
-
 if contacts.empty:
     st.warning("No data in the cache yet. Click **Refresh from HubSpot** in the sidebar.")
     st.stop()
 
 classified = classify_dataframe(contacts, companies)
+submissions_df = load_form_submissions()
+deals_df = load_deals()
+tasks_df = load_tasks()
 
 now_ts = pd.Timestamp.now(tz="UTC")
 start_ts = pd.Timestamp(start_date, tz="UTC")
 end_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
-in_period = classified[
-    (classified["createdate"] >= start_ts) & (classified["createdate"] < end_ts)
-].copy()
-
-
-# ---- Load form data and build per-form aggregates ----
-forms_df = load_forms()
-submissions_df = load_form_submissions()
-
-# Apply year filter from sidebar
-if form_year_filter == "2026 only":
-    year_pattern = "2026"
-elif form_year_filter == "2025 only":
-    year_pattern = "2025"
-else:
-    year_pattern = None
-
-if year_pattern and not forms_df.empty:
-    forms_df = forms_df[forms_df["name"].str.contains(year_pattern, case=False, na=False)].copy()
-
-# Exclude forms from the legacy/old site (ezragroup.com pre-redesign).
-if not forms_df.empty:
-    forms_df = forms_df[~forms_df["name"].str.contains("Old Site", case=False, na=False)].copy()
-
-if not submissions_df.empty and not forms_df.empty:
-    submissions_df = submissions_df[submissions_df["form_id"].isin(forms_df["id"])].copy()
-
-# Compute prior period (same length, immediately before current)
 period_length = end_ts - start_ts
 prior_start_ts = start_ts - period_length
 prior_end_ts = start_ts
 
+in_period = classified[
+    (classified["createdate"] >= start_ts) & (classified["createdate"] < end_ts)
+].copy()
 in_prior_period = classified[
     (classified["createdate"] >= prior_start_ts) & (classified["createdate"] < prior_end_ts)
 ].copy()
 
-# Filter submissions to the selected period
-subs_in_period = submissions_df[
-    (submissions_df["submitted_at"] >= start_ts)
-    & (submissions_df["submitted_at"] < end_ts)
-].copy() if not submissions_df.empty else pd.DataFrame()
-
-subs_in_prior = submissions_df[
-    (submissions_df["submitted_at"] >= prior_start_ts)
-    & (submissions_df["submitted_at"] < prior_end_ts)
-].copy() if not submissions_df.empty else pd.DataFrame()
-
-# Build email → lead_status lookup (lowercase email keys)
-classified_with_email = classified.copy()
-classified_with_email["email_lc"] = classified_with_email["email"].str.lower()
-email_to_status = classified_with_email.set_index("email_lc")["lead_status"].to_dict()
-email_to_category = classified_with_email.set_index("email_lc")["lead_category"].to_dict()
-
-
-def _per_form_aggregate(subs: pd.DataFrame, forms: pd.DataFrame) -> pd.DataFrame:
-    """For each form: submissions, leads (among unique submitters), lead %."""
-    if subs.empty or forms.empty:
-        return pd.DataFrame(columns=["Form", "Subs", "Leads", "%"])
-    rows = []
-    name_lookup = forms.set_index("id")["name"].to_dict()
-    for fid, group in subs.groupby("form_id"):
-        people = group["contact_email"].dropna().unique()
-        n_people = len(people)
-        n_subs = len(group)
-        n_leads = sum(1 for e in people if email_to_status.get(e) == "lead")
-        # Strip year prefix to save horizontal space.
-        raw_name = name_lookup.get(fid, fid)
-        display_name = raw_name
-        for prefix in ("2026 ", "2025 ", "2024 "):
-            if display_name.startswith(prefix):
-                display_name = display_name[len(prefix):]
-                break
-        rows.append({
-            "Form": display_name,
-            "Subs": n_subs,
-            "Leads": n_leads,
-            "%": (n_leads / n_people * 100) if n_people else 0.0,
-        })
-    return pd.DataFrame(rows).sort_values("Subs", ascending=False)
-
-
-def _spotlight_for(subs: pd.DataFrame, forms: pd.DataFrame, pattern: str) -> dict:
-    """Aggregate submissions across forms whose name matches the pattern (case-insensitive substring)."""
-    if forms.empty or subs.empty:
-        return {"people": 0, "submissions": 0, "leads": 0, "form_count": 0}
-    matched_ids = forms[forms["name"].str.contains(pattern, case=False, na=False)]["id"].tolist()
-    if not matched_ids:
-        return {"people": 0, "submissions": 0, "leads": 0, "form_count": 0}
-    relevant = subs[subs["form_id"].isin(matched_ids)]
-    people = relevant["contact_email"].dropna().unique()
-    leads = sum(1 for e in people if email_to_status.get(e) == "lead")
-    return {
-        "people": len(people),
-        "submissions": len(relevant),
-        "leads": leads,
-        "form_count": len(matched_ids),
-    }
-
-
-# ---- Headline KPIs (compact row of 5) ----
-n_contacts = len(in_period)
-n_leads = int((in_period["lead_status"] == "lead").sum())
-n_unclassified = int((in_period["lead_status"] == "unclassified").sum())
-n_non_lead = int((in_period["lead_status"] == "non_lead").sum())
-n_submissions = int(len(subs_in_period))
-n_unique_fillers = int(subs_in_period["contact_email"].dropna().nunique()) if not subs_in_period.empty else 0
-
-# Per-category lead counts for the priority segments
-n_ria = int((in_period["lead_category"] == "RIA").sum())
-n_bd = int((in_period["lead_category"] == "Broker-Dealer").sum())
-
-# Prior-period counterparts
-p_contacts = len(in_prior_period)
-p_leads = int((in_prior_period["lead_status"] == "lead").sum())
-p_unclassified = int((in_prior_period["lead_status"] == "unclassified").sum())
-p_non_lead = int((in_prior_period["lead_status"] == "non_lead").sum())
-p_submissions = int(len(subs_in_prior))
-p_ria = int((in_prior_period["lead_category"] == "RIA").sum())
-p_bd = int((in_prior_period["lead_category"] == "Broker-Dealer").sum())
-
-# Load deals + tasks for the deal-pipeline KPIs
-deals_df = load_deals()
-tasks_df = load_tasks()
-
-# Compute open deals and tasks due this week.
-# Stages use per-portal IDs (custom pipelines have numeric ids), so we rely on the
-# stage_is_closed flag resolved from HubSpot's pipeline metadata at ingest time.
-# Legacy fallback: caches refreshed before that flag existed have all-NULL
-# stage_is_closed — fall back to the default-pipeline literal stage names.
-CLOSED_STAGES = {"closedwon", "closedlost"}
-if deals_df.empty:
-    open_deals = pd.DataFrame()
-elif deals_df["stage_is_closed"].notna().any():
-    open_deals = deals_df[deals_df["stage_is_closed"].fillna(0).astype(int) == 0].copy()
-elif "dealstage" in deals_df.columns:
-    open_deals = deals_df[~deals_df["dealstage"].fillna("").str.lower().isin(CLOSED_STAGES)].copy()
-else:
-    open_deals = pd.DataFrame()
-
-week_cutoff = now_ts + pd.Timedelta(days=7)
-if not tasks_df.empty and "due_at" in tasks_df.columns:
-    tasks_due_week = tasks_df[
-        (tasks_df["due_at"] >= now_ts)
-        & (tasks_df["due_at"] < week_cutoff)
-        & (~tasks_df["status"].fillna("").str.upper().isin({"COMPLETED", "DEFERRED"}))
-    ].copy()
-else:
-    tasks_due_week = pd.DataFrame()
-
-# Open deals that have at least one task due this week
-if not open_deals.empty and not tasks_due_week.empty:
-    # Build a set of deal IDs referenced by due tasks
-    due_deal_ids = set()
-    for ids_str in tasks_due_week["associated_deal_ids"].dropna():
-        if ids_str:
-            for did in str(ids_str).split(","):
-                did = did.strip()
-                if did:
-                    due_deal_ids.add(did)
-    open_deals_with_due_tasks = open_deals[open_deals["id"].astype(str).isin(due_deal_ids)]
-    n_deals_due = len(open_deals_with_due_tasks)
-else:
-    n_deals_due = 0
-
-n_tasks_due = len(tasks_due_week)
-
-
-# If the prior comparison window falls before the trusted-data date, deltas are
-# meaningless (we'd be comparing post-HubSpot to pre-HubSpot).
 trusted_from_ts = pd.Timestamp(trusted_from, tz="UTC")
 prior_comparison_trustworthy = prior_start_ts >= trusted_from_ts
 
 
 def _fmt_delta(current: float, prior: float) -> str | None:
-    """Return a signed percent-change string, e.g. '+12%' or '-7%'. Streamlit colors based on sign."""
+    """Signed percent-change vs the prior period, or None to hide the delta."""
     if not prior_comparison_trustworthy:
-        return None  # Hide delta entirely when prior period is pre-HubSpot.
+        return None  # Prior window is pre-HubSpot — comparison would be meaningless.
     if prior == 0:
-        if current == 0:
-            return "0% vs prior"
-        return "new (vs 0)"
+        return None if current == 0 else "new (vs 0)"
     pct = (current - prior) / prior * 100
-    return f"{pct:+.0f}% vs prior period"
+    return f"{pct:+.0f}% vs prior"
 
 
-# ---- CRO-style aggregates: Hot Accounts ----
-HEAT_WINDOW_DAYS = 30  # rolling window for "engaged recently"
-heat_cutoff = now_ts - pd.Timedelta(days=HEAT_WINDOW_DAYS)
-
-# Outreach-eligible firm types for the consulting business. Tighter than the broader
-# LEAD_CATEGORIES list — Hot Accounts is for "who do we call THIS week," not lead counts.
-# Mapping uses Company.firm_type internal values.
+# ---------------------------------------------------------------------------
+# Exclusion lists (internal / vendor / partner — not prospects)
+# ---------------------------------------------------------------------------
 ICP_FIRM_TYPES_FOR_OUTREACH = {
     "ria", "brokerdealer", "banktrust", "custodian", "asset_manager", "fintech",
 }
-
-# Domains explicitly known not to be prospects — applied even if firm_type isn't set.
-# Edit as you discover new internal/vendor/partner domains.
 EXCLUDED_DOMAINS = {
     "ezragroup.com",      # Own company
     "grimmandco.org",     # Fractional CMO firm
     "streetcredpr.com",   # PR firm
     "mochadesigns.co",    # External development partner
 }
-
-# Specific email addresses to exclude even when the domain is shared (e.g., gmail.com).
-# Use for personal addresses of vendors/partners/internal people who aren't prospects.
 EXCLUDED_EMAILS = {
     "grimm.marcus@gmail.com",  # Fractional CMO (personal email)
 }
@@ -531,7 +392,6 @@ def _domain_of(email: str | None) -> str | None:
 
 
 def _is_excluded(email: str | None) -> bool:
-    """True if this contact is a known internal/vendor/partner — not a prospect."""
     if not email:
         return False
     e = str(email).lower().strip()
@@ -541,26 +401,24 @@ def _is_excluded(email: str | None) -> bool:
     return dom in EXCLUDED_DOMAINS if dom else False
 
 
-def _build_hot_accounts() -> pd.DataFrame:
-    """Aggregate engagement signals per company over the last HEAT_WINDOW_DAYS.
+# ---------------------------------------------------------------------------
+# Engagement builders (hot accounts, stalled, multi-touch warm)
+# ---------------------------------------------------------------------------
+HEAT_WINDOW_DAYS = 30
+heat_cutoff = now_ts - pd.Timedelta(days=HEAT_WINDOW_DAYS)
 
-    Filters applied (CRO directive):
-      - Only companies with firm_type in ICP_FIRM_TYPES_FOR_OUTREACH
-      - Excluded domains (own company, CMO, PR partners, etc.) dropped regardless of firm_type
-    """
+
+def _build_hot_accounts() -> pd.DataFrame:
+    """ICP firms with 2+ contacts who submitted a form in the last HEAT_WINDOW_DAYS."""
     if submissions_df.empty or classified.empty:
         return pd.DataFrame()
-
     recent_subs = submissions_df[submissions_df["submitted_at"] >= heat_cutoff].copy()
     if recent_subs.empty:
         return pd.DataFrame()
-
-    # Drop submissions from excluded contacts/domains right at the source
     recent_subs = recent_subs[~recent_subs["contact_email"].apply(_is_excluded)]
     if recent_subs.empty:
         return pd.DataFrame()
 
-    # Join submissions to contacts → companies via email
     email_to_company = (
         classified.dropna(subset=["email"])
         .assign(email_lc=classified["email"].str.lower())
@@ -585,9 +443,7 @@ def _build_hot_accounts() -> pd.DataFrame:
         return pd.DataFrame()
     eng = pd.DataFrame(rows)
 
-    # Aggregate per company
     company_lookup = companies.set_index("id")[["name", "domain", "firm_type"]].to_dict("index") if not companies.empty else {}
-
     agg = (
         eng.groupby("company_id")
         .agg(
@@ -599,7 +455,6 @@ def _build_hot_accounts() -> pd.DataFrame:
         .reset_index()
     )
 
-    # Annotate with company info (tolerate NaN/None from SQLite/pandas)
     def _ft(c):
         v = company_lookup.get(c, {}).get("firm_type")
         if v is None or (isinstance(v, float) and v != v):
@@ -622,25 +477,17 @@ def _build_hot_accounts() -> pd.DataFrame:
     agg["company_domain"] = agg["company_id"].apply(_dm)
     agg["firm_type"] = agg["company_id"].apply(_ft)
 
-    # CRO directive filters
     agg = agg[~agg["company_domain"].fillna("").str.lower().isin(EXCLUDED_DOMAINS)]
     agg = agg[agg["firm_type"].isin(ICP_FIRM_TYPES_FOR_OUTREACH)]
-
-    # Filter: 2+ contacts engaging
     agg = agg[agg["contacts_engaged"] >= 2].copy()
     if agg.empty:
         return agg
-
     agg["heat_score"] = agg["contacts_engaged"] * agg["submissions"]
     agg["days_since"] = (now_ts - agg["last_activity"]).dt.days
     return agg.sort_values(["heat_score", "last_activity"], ascending=[False, False])
 
 
-hot_accounts_df = _build_hot_accounts()
-
-
 def _latest_activity_ts(row) -> pd.Timestamp | None:
-    """Find the most recent activity timestamp across the activity-tracking fields we pull."""
     candidates = []
     for col in ("notes_last_contacted", "hs_email_last_click_date", "hs_email_last_open_date"):
         v = row.get(col)
@@ -657,22 +504,13 @@ def _latest_activity_ts(row) -> pd.Timestamp | None:
 
 
 def _build_stalled_leads() -> pd.DataFrame:
-    """Stalled = ICP contact who WAS in active pipeline but went quiet 45+ days.
-
-    'In active pipeline' = at least one of:
-      - num_associated_deals >= 1 (deal opened)
-      - notes_last_contacted is set (sales touched them at some point)
-      - num_conversion_events >= 2 (multi-touch via forms)
-    """
+    """ICP lead with prior pipeline activity (deal / sales touch / 2+ fills) but quiet 45+ days."""
     if classified.empty:
         return pd.DataFrame()
     df = classified[classified["lead_status"] == "lead"].copy()
-    # Drop internal/vendor/partner contacts
     df = df[~df["email"].apply(_is_excluded)]
     if df.empty:
         return df
-
-    # Must have prior pipeline activity
     df["_deals"] = df.get("num_associated_deals", 0).fillna(0)
     df["_convs"] = df.get("num_conversion_events", 0).fillna(0)
     df["_notes"] = df.get("notes_last_contacted")
@@ -684,7 +522,6 @@ def _build_stalled_leads() -> pd.DataFrame:
     df = df[df["_has_pipeline"]].copy()
     if df.empty:
         return df
-
     df["_last_activity"] = df.apply(_latest_activity_ts, axis=1)
     df = df[df["_last_activity"].notna()].copy()
     df["_days_quiet"] = (now_ts - df["_last_activity"]).dt.days
@@ -693,11 +530,10 @@ def _build_stalled_leads() -> pd.DataFrame:
 
 
 def _build_multi_touch_warm() -> pd.DataFrame:
-    """Multi-touch warm = ICP, 3+ conversions, zero associated deals."""
+    """ICP lead with 3+ conversions and zero associated deals — never started."""
     if classified.empty:
         return pd.DataFrame()
     df = classified[classified["lead_status"] == "lead"].copy()
-    # Drop internal/vendor/partner contacts
     df = df[~df["email"].apply(_is_excluded)]
     if df.empty:
         return df
@@ -710,560 +546,336 @@ def _build_multi_touch_warm() -> pd.DataFrame:
     return df.sort_values("_convs", ascending=False)
 
 
+# ---------------------------------------------------------------------------
+# Deals + tasks: open pipeline, hot-deal scoring, task urgency
+# ---------------------------------------------------------------------------
+CLOSED_STAGES = {"closedwon", "closedlost"}  # legacy fallback for pre-metadata caches
+
+
+def _open_deals() -> pd.DataFrame:
+    if deals_df.empty:
+        return pd.DataFrame()
+    if deals_df["stage_is_closed"].notna().any():
+        return deals_df[deals_df["stage_is_closed"].fillna(0).astype(int) == 0].copy()
+    if "dealstage" in deals_df.columns:
+        return deals_df[~deals_df["dealstage"].fillna("").str.lower().isin(CLOSED_STAGES)].copy()
+    return pd.DataFrame()
+
+
+def _active_tasks(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "status" not in df.columns or "due_at" not in df.columns:
+        return pd.DataFrame()
+    return df[~df["status"].fillna("").str.upper().isin({"COMPLETED", "DEFERRED"})].copy()
+
+
+def _deal_ids_with_urgent_tasks(active: pd.DataFrame, horizon_days: int = 14) -> set[str]:
+    """Deal IDs that have an active task overdue or due within `horizon_days`."""
+    ids: set[str] = set()
+    if active.empty or "associated_deal_ids" not in active.columns:
+        return ids
+    horizon = now_ts + pd.Timedelta(days=horizon_days)
+    soon = active[active["due_at"] < horizon]
+    for s in soon["associated_deal_ids"].dropna():
+        for d in str(s).split(","):
+            d = d.strip()
+            if d:
+                ids.add(d)
+    return ids
+
+
+open_deals = _open_deals()
+active_tasks = _active_tasks(tasks_df)
+
+# Overdue + due-this-week task slices
+if not active_tasks.empty:
+    week_cutoff = now_ts + pd.Timedelta(days=7)
+    overdue_tasks = active_tasks[active_tasks["due_at"] < now_ts].copy()
+    tasks_due_week = active_tasks[
+        (active_tasks["due_at"] >= now_ts) & (active_tasks["due_at"] < week_cutoff)
+    ].copy()
+else:
+    overdue_tasks = pd.DataFrame()
+    tasks_due_week = pd.DataFrame()
+
+urgent_deal_ids = _deal_ids_with_urgent_tasks(active_tasks)
+
+# Deal lookups for action links + company names
+company_name_lookup = companies.set_index("id")["name"].to_dict() if not companies.empty else {}
+deal_lookup: dict[str, dict] = {}
+if not deals_df.empty:
+    for _, d in deals_df.iterrows():
+        deal_lookup[str(d["id"])] = {
+            "name": d.get("name"),
+            "url": _deal_url(d["id"], d.get("hubspot_url")),
+        }
+
+# Hot deals: blended score (value 0.5 · close-date proximity 0.3 · activity 0.2)
+if not open_deals.empty:
+    hot_deals = open_deals.copy()
+    _max_amount = float(hot_deals["amount"].fillna(0).max() or 0.0)
+
+    def _hot_deal_score(row) -> float:
+        amount = row.get("amount") or 0
+        value_score = (amount / _max_amount) if _max_amount else 0.0
+        close_score = 0.0
+        cd = row.get("closedate")
+        if pd.notna(cd):
+            days = (cd - now_ts).days
+            if days <= 0:
+                close_score = 1.0  # close date passed — needs attention now
+            elif days <= 90:
+                close_score = 1 - days / 90
+        activity_score = 1.0 if str(row.get("id")) in urgent_deal_ids else 0.0
+        return 0.5 * value_score + 0.3 * close_score + 0.2 * activity_score
+
+    hot_deals["score"] = hot_deals.apply(_hot_deal_score, axis=1)
+    hot_deals["has_urgent_task"] = hot_deals["id"].astype(str).isin(urgent_deal_ids)
+    hot_deals = hot_deals.sort_values("score", ascending=False)
+else:
+    hot_deals = pd.DataFrame()
+
+# Deals closing inside the selected period (open only)
+if not open_deals.empty and "closedate" in open_deals.columns:
+    closing_period = open_deals[
+        (open_deals["closedate"] >= start_ts) & (open_deals["closedate"] < end_ts)
+    ].copy()
+else:
+    closing_period = pd.DataFrame()
+
+# ---- Engagement-based action sources ----
+hot_accounts_df = _build_hot_accounts()
 stalled_leads_df = _build_stalled_leads()
 multi_touch_df = _build_multi_touch_warm()
 
+# ---------------------------------------------------------------------------
+# Critical KPI figures
+# ---------------------------------------------------------------------------
+QUALIFIED_CATS = ["RIA", "Broker-Dealer", "Fintech"]  # RIA · BD · WealthTech vendors
 
-# ---- Signals: auto-generated alerts ----
-PERSONAL_DOMAINS = {
-    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com",
-    "aol.com", "me.com", "comcast.net", "live.com", "mail.com", "msn.com",
-    "protonmail.com", "ymail.com", "verizon.net", "att.net", "sbcglobal.net",
-}
+n_qualified = int(in_period["lead_category"].isin(QUALIFIED_CATS).sum())
+p_qualified = int(in_prior_period["lead_category"].isin(QUALIFIED_CATS).sum())
+n_ria = int((in_period["lead_category"] == "RIA").sum())
+n_bd = int((in_period["lead_category"] == "Broker-Dealer").sum())
+n_wt = int((in_period["lead_category"] == "Fintech").sum())
 
-
-def _domain_from_email(email):
-    if email is None or pd.isna(email) or "@" not in str(email):
-        return None
-    return str(email).split("@")[-1].lower().strip()
-
-
-def _strip_year(name: str) -> str:
-    for prefix in ("2026 ", "2025 ", "2024 "):
-        if name.startswith(prefix):
-            return name[len(prefix):]
-    return name
+open_pipeline_value = float(open_deals["amount"].fillna(0).sum()) if not open_deals.empty else 0.0
+n_open_deals = len(open_deals)
+n_closing = len(closing_period)
+closing_value = float(closing_period["amount"].fillna(0).sum()) if not closing_period.empty else 0.0
+n_overdue = len(overdue_tasks)
+n_due_week = len(tasks_due_week)
 
 
-def _date_recent(ts_str, days: int) -> bool:
-    """True if the ISO timestamp is within `days` of now."""
-    if not ts_str or pd.isna(ts_str):
-        return False
-    try:
-        ts = pd.Timestamp(ts_str)
-        if ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-        return (now_ts - ts).days <= days
-    except (ValueError, TypeError):
-        return False
+# ===========================================================================
+# 1) ⚡ DO THIS NOW — exception-based action queue
+# ===========================================================================
+def _task_link(t) -> str | None:
+    ids = t.get("associated_deal_ids")
+    if ids:
+        first = str(ids).split(",")[0].strip()
+        if first in deal_lookup:
+            return deal_lookup[first]["url"]
+    return None
 
 
-def _generate_cro_signals() -> list[dict]:
-    """Sales/marketing alerts: deal-impact, source health, pipeline velocity.
+actions: list[dict] = []
 
-    These take precedence over classification noise.
-    """
-    sigs = []
-
-    # 1. 🔥 Hot accounts (3+ contacts engaging) — top deal-impact signal
-    if not hot_accounts_df.empty:
-        very_hot = hot_accounts_df[hot_accounts_df["contacts_engaged"] >= 3]
-        for _, row in very_hot.head(5).iterrows():
-            cname = row.get("company_name") or row.get("company_domain") or row["company_id"]
-            sigs.append({
-                "key": f"hot_account:{row['company_id']}",
-                "severity": "critical", "icon": "🔥",
-                "title": f"Hot account: {cname}",
-                "detail": f"{int(row['contacts_engaged'])} distinct contacts, {int(row['submissions'])} engagements in last {HEAT_WINDOW_DAYS}d. "
-                          f"Last touch {int(row['days_since'])}d ago. firm_type: {row.get('firm_type') or 'unset'}. "
-                          f"Book a discovery call before this cools.",
-            })
-
-    # 2. ⏰ Stalled leads — ICP contacts who WERE in active pipeline but went quiet
-    # Tightened: must have evidence of active engagement (deal opened OR sales-touched OR multiple form fills)
-    # so we don't flag pre-HubSpot bulk imports as "stalled."
-    stalled_df = _build_stalled_leads()
-    if len(stalled_df) >= 3:
-        sigs.append({
-            "key": "stalled_leads_bulk",
-            "severity": "critical", "icon": "⏰",
-            "title": f"{len(stalled_df)} stalled leads",
-            "detail": f"{len(stalled_df)} ICP contacts with prior engagement (deal opened, sales contact, or multi-touch) "
-                      f"but no activity in 45+ days. See the list below the signals.",
+# Priority 1 — overdue tasks (already late)
+if not overdue_tasks.empty:
+    for _, t in overdue_tasks.sort_values("due_at").head(8).iterrows():
+        due = t.get("due_at")
+        days_late = (now_ts - due).days if pd.notna(due) else None
+        detail = (f"{days_late}d late" if days_late is not None else "overdue")
+        if pd.notna(due):
+            detail += f" · was due {due.strftime('%b %d')}"
+        actions.append({
+            "priority": 1, "icon": "🚨",
+            "title": f"Overdue task: {t.get('subject') or '(no subject)'}",
+            "detail": detail,
+            "link": _task_link(t),
         })
 
-    # 3. 💎 Multi-touch warm contacts — high engagement, no deal yet
-    if len(multi_touch_df) >= 1:
-        sigs.append({
-            "key": "multi_touch_warm_bulk",
-            "severity": "warning", "icon": "💎",
-            "title": f"{len(multi_touch_df)} multi-touch warm leads",
-            "detail": f"{len(multi_touch_df)} ICP contacts with 3+ form fills and zero deals. List below — open each in HubSpot to start the conversation.",
+# Priority 2 — hot accounts to call (3+ contacts engaged)
+if not hot_accounts_df.empty:
+    very_hot = hot_accounts_df[hot_accounts_df["contacts_engaged"] >= 3]
+    for _, r in very_hot.head(5).iterrows():
+        name = r.get("company_name") or r.get("company_domain") or r["company_id"]
+        actions.append({
+            "priority": 2, "icon": "🔥",
+            "title": f"Call {name}",
+            "detail": f"{int(r['contacts_engaged'])} contacts engaged · {int(r['submissions'])} fills in {HEAT_WINDOW_DAYS}d · last touch {int(r['days_since'])}d ago",
+            "link": _company_url(r["company_id"]),
         })
 
-    # 4. 📉 Pipeline drought — rolling 4-week lead trend
-    if not classified.empty and prior_comparison_trustworthy:
-        four_weeks_ago = now_ts - pd.Timedelta(days=28)
-        eight_weeks_ago = now_ts - pd.Timedelta(days=56)
-        leads_in = classified[classified["lead_status"] == "lead"].copy()
-        recent_leads = leads_in[(leads_in["createdate"] >= four_weeks_ago) & (leads_in["createdate"] <= now_ts)]
-        prior_leads_4w = leads_in[(leads_in["createdate"] >= eight_weeks_ago) & (leads_in["createdate"] < four_weeks_ago)]
-        if len(prior_leads_4w) >= 10 and len(recent_leads) < len(prior_leads_4w) * 0.7:
-            drop = (len(recent_leads) - len(prior_leads_4w)) / len(prior_leads_4w) * 100
-            sigs.append({
-                "key": "pipeline_drought",
-                "severity": "critical", "icon": "📉",
-                "title": f"Lead run-rate down {drop:+.0f}% (4-week trend)",
-                "detail": f"{len(recent_leads)} leads in last 28d vs. {len(prior_leads_4w)} in the 28d before. "
-                          f"At this rate you'll miss target — investigate top sources.",
-            })
+# Priority 3 — open deals closing this period
+if not closing_period.empty:
+    for _, d in closing_period.sort_values("amount", ascending=False).head(5).iterrows():
+        amt = d.get("amount") or 0
+        cd = d.get("closedate")
+        actions.append({
+            "priority": 3, "icon": "💰",
+            "title": f"Advance to close: {d.get('name') or '(unnamed deal)'}",
+            "detail": f"${amt:,.0f} · {d.get('stage_label') or d.get('dealstage') or 'stage n/a'} · closes {cd.strftime('%b %d') if pd.notna(cd) else 'TBD'}",
+            "link": _deal_url(d["id"], d.get("hubspot_url")),
+        })
 
-    return sigs
+# Priority 4 — tasks due in the next 7 days
+if not tasks_due_week.empty:
+    for _, t in tasks_due_week.sort_values("due_at").head(6).iterrows():
+        due = t.get("due_at")
+        actions.append({
+            "priority": 4, "icon": "📌",
+            "title": f"Task due: {t.get('subject') or '(no subject)'}",
+            "detail": f"due {due.strftime('%b %d') if pd.notna(due) else 'soon'}",
+            "link": _task_link(t),
+        })
 
+# Priority 5 — stalled leads to re-engage
+for _, c in stalled_leads_df.head(5).iterrows():
+    actions.append({
+        "priority": 5, "icon": "⏰",
+        "title": f"Re-engage {c.get('email') or '(no email)'}",
+        "detail": f"{c.get('lead_category') or c.get('firm_type') or 'ICP'} · quiet {int(c['_days_quiet'])}d · had prior pipeline activity",
+        "link": _contact_url(c["id"]),
+    })
 
-def _generate_signals() -> list[dict]:
-    """Generate signals. Each has a stable `key` so dismissals persist day-to-day.
+# Priority 6 — multi-touch warm leads with no deal
+for _, c in multi_touch_df.head(5).iterrows():
+    actions.append({
+        "priority": 6, "icon": "💎",
+        "title": f"Start the conversation: {c.get('email') or '(no email)'}",
+        "detail": f"{int(c['_convs'])} form fills · zero deals · {c.get('lead_category') or c.get('firm_type') or 'ICP'}",
+        "link": _contact_url(c["id"]),
+    })
 
-    Signals that compare prior period are skipped when the prior period falls
-    before the trusted-data date.
-    """
-    sigs = []
-    form_names = forms_df.set_index("id")["name"].to_dict() if not forms_df.empty else {}
-
-    # Signals that REQUIRE a trustworthy prior period
-    if prior_comparison_trustworthy:
-        # 1. Backlog growing materially
-        if p_unclassified >= 20 and n_unclassified > p_unclassified * 1.1:
-            growth = (n_unclassified - p_unclassified) / p_unclassified * 100
-            sigs.append({
-                "key": "backlog_growing",
-                "severity": "critical", "icon": "🚨",
-                "title": f"Backlog grew {growth:+.0f}%",
-                "detail": f"{n_unclassified:,} unclassified now vs. {p_unclassified:,} prior ({n_unclassified - p_unclassified:+,} net). "
-                          f"Classification debt is compounding — see Backlog page.",
-            })
-
-        # 2. Lead count dropped sharply
-        if p_leads >= 10 and n_leads < p_leads * 0.75:
-            drop = (n_leads - p_leads) / p_leads * 100
-            sigs.append({
-                "key": "leads_dropped",
-                "severity": "critical", "icon": "🚨",
-                "title": f"Leads dropped {drop:+.0f}%",
-                "detail": f"{n_leads} this period vs. {p_leads} prior. Investigate source mix and form performance below.",
-            })
-
-        # 3. Forms that went dark
-        if not subs_in_prior.empty:
-            prior_counts = subs_in_prior.groupby("form_id").size().to_dict()
-            cur_counts = subs_in_period.groupby("form_id").size().to_dict() if not subs_in_period.empty else {}
-            for fid, prior_n in prior_counts.items():
-                if prior_n >= 3 and cur_counts.get(fid, 0) == 0:
-                    name = _strip_year(form_names.get(fid, fid))
-                    sigs.append({
-                        "key": f"form_dark:{fid}",
-                        "severity": "warning", "icon": "⚠️",
-                        "title": f"Form went dark: {name}",
-                        "detail": f"{prior_n} submissions prior period, 0 now. Page broken, campaign ended, or audience tapped out?",
-                    })
-
-        # 4. Forms newly active (debut)
-        if not subs_in_period.empty:
-            prior_counts = subs_in_prior.groupby("form_id").size().to_dict() if not subs_in_prior.empty else {}
-            cur_counts = subs_in_period.groupby("form_id").size().to_dict()
-            for fid, cur_n in cur_counts.items():
-                if cur_n >= 3 and prior_counts.get(fid, 0) == 0:
-                    name = _strip_year(form_names.get(fid, fid))
-                    sigs.append({
-                        "key": f"form_debut:{fid}",
-                        "severity": "info", "icon": "🆕",
-                        "title": f"Form debut: {name}",
-                        "detail": f"First {cur_n} submissions this period — form had zero fills in the prior period. Brand-new traffic source. Check lead quality on Forms page.",
-                    })
-
-        # 5. Lead-rate (audience quality) jumps or drops
-        if not subs_in_period.empty and not subs_in_prior.empty:
-            cur_per_form = subs_in_period.groupby("form_id")
-            prior_per_form = subs_in_prior.groupby("form_id")
-            for fid in set(cur_per_form.groups) & set(prior_per_form.groups):
-                cur_emails = cur_per_form.get_group(fid)["contact_email"].dropna().unique()
-                prior_emails = prior_per_form.get_group(fid)["contact_email"].dropna().unique()
-                if len(cur_emails) < 5 or len(prior_emails) < 5:
-                    continue
-                cur_rate = sum(1 for e in cur_emails if email_to_status.get(e) == "lead") / len(cur_emails) * 100
-                prior_rate = sum(1 for e in prior_emails if email_to_status.get(e) == "lead") / len(prior_emails) * 100
-                diff_pp = cur_rate - prior_rate
-                name = _strip_year(form_names.get(fid, fid))
-                if diff_pp >= 20:
-                    sigs.append({
-                        "key": f"rate_up:{fid}",
-                        "severity": "info", "icon": "📈",
-                        "title": f"Audience quality up: {name}",
-                        "detail": f"Same form, better fits — {cur_rate:.0f}% ICP leads now vs. {prior_rate:.0f}% prior (+{diff_pp:.0f}pp). Worth amplifying.",
-                    })
-                elif diff_pp <= -20:
-                    sigs.append({
-                        "key": f"rate_down:{fid}",
-                        "severity": "warning", "icon": "📉",
-                        "title": f"Audience quality down: {name}",
-                        "detail": f"Same form, worse fits — {cur_rate:.0f}% ICP leads now vs. {prior_rate:.0f}% prior ({diff_pp:.0f}pp). Wrong channel/copy?",
-                    })
-
-    # Signals that DON'T need a prior period — always run
-    # 6. Unclassified domain spikes
-    unclass = in_period[in_period["lead_status"] == "unclassified"].copy()
-    if not unclass.empty:
-        unclass["_domain"] = unclass["email"].apply(_domain_from_email)
-        domain_counts = unclass[unclass["_domain"].notna()]["_domain"].value_counts()
-        spike_count = 0
-        for domain, count in domain_counts.items():
-            if count >= 5 and domain not in PERSONAL_DOMAINS:
-                sigs.append({
-                    "key": f"domain_spike:{domain}",
-                    "severity": "info", "icon": "💡",
-                    "title": f"Classify once, count {count}: {domain}",
-                    "detail": f"{count} unclassified contacts share this domain — set Company.firm_type once and all {count} become leads.",
-                })
-                spike_count += 1
-                if spike_count >= 5:  # cap noise
-                    break
-
-    return sigs
-
-
-_severity_styles = {
-    "critical": "background:#fde2e2; border-left:4px solid #d9534f;",
-    "warning":  "background:#fff3cd; border-left:4px solid #ffc107;",
-    "info":     "background:#e3f2fd; border-left:4px solid #2196f3;",
-}
-_severity_order = {"critical": 0, "warning": 1, "info": 2}
-
-today_iso = datetime.now(timezone.utc).date().isoformat()
-dismissed_keys = db.active_dismissals(today_iso)
-
-
-def _render_signals(sigs: list[dict], empty_message: str) -> None:
-    sigs = [s for s in sigs if s["key"] not in dismissed_keys]
-    sigs.sort(key=lambda s: _severity_order.get(s["severity"], 99))
-    if not sigs:
-        st.markdown(
-            f"<div style='padding:0.4rem 0.7rem; margin-bottom:0.5rem; border-radius:4px; "
-            f"background:#e8f5e9; border-left:4px solid #4caf50; font-size:0.85rem;'>"
-            f"<b>✅</b> {empty_message}"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        return
-    for sig in sigs:
-        style = _severity_styles.get(sig["severity"], "")
-        row = st.columns([0.04, 0.96])
-        with row[0]:
-            if st.checkbox(
-                "dismiss",
-                key=f"sig_dismiss_{sig['key']}",
-                label_visibility="collapsed",
-                help="Dismiss until tomorrow. If the issue persists, the signal re-appears.",
-            ):
-                db.dismiss_signal(sig["key"], today_iso)
-                st.rerun()
-        with row[1]:
-            st.markdown(
-                f"<div style='padding:0.3rem 0.7rem; margin-bottom:0.2rem; border-radius:4px; "
-                f"{style} font-size:0.85rem;'>"
-                f"<b>{sig['icon']} {sig['title']}</b> — {sig['detail']}"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-
-
-# ---- Hot Accounts table — top of page, deal-impact view ----
-st.markdown("**🔥 Hot Accounts** — ICP firms with 2+ contacts engaging in the last 30 days")
-st.caption(
-    "Filtered to firm_type ∈ RIA, Broker-Dealer, Bank/Trust, Custodian, Asset Manager, Fintech. "
-    f"Internal/vendor domains excluded ({', '.join(sorted(EXCLUDED_DOMAINS))}). "
-    f"Plus {len(EXCLUDED_EMAILS)} specific email(s) excluded."
-)
-if hot_accounts_df.empty:
+st.markdown("#### ⚡ Do This Now")
+_ACTION_CAP = 12
+if not actions:
     st.markdown(
-        "<div style='padding:0.4rem 0.7rem; margin-bottom:0.5rem; border-radius:4px; "
-        "background:#f5f5f5; border-left:4px solid #999; font-size:0.85rem;'>"
-        "No ICP firms have 2+ engaged contacts in the last 30 days. "
-        "Either classify more companies in HubSpot (so they qualify), or drive more form fills."
+        "<div style='padding:0.5rem 0.8rem; border-radius:6px; background:#e8f5e9; "
+        "border-left:4px solid #4caf50; font-size:0.9rem;'>"
+        "<b>✅ You're clear.</b> No overdue tasks, hot accounts, or stalled leads need you right now — keep the pipeline fed."
         "</div>",
         unsafe_allow_html=True,
     )
 else:
-    ha_display = hot_accounts_df.head(10)[[
-        "company_name", "company_domain", "firm_type",
-        "contacts_engaged", "submissions", "leads_count", "days_since",
-    ]].rename(columns={
-        "company_name": "Company",
-        "company_domain": "Domain",
-        "firm_type": "Firm type",
-        "contacts_engaged": "Contacts",
-        "submissions": "Engagements",
-        "leads_count": "ICP",
-        "days_since": "Days since",
-    })
+    actions.sort(key=lambda a: a["priority"])
+    for a in actions[:_ACTION_CAP]:
+        link_html = (
+            f" <a href='{a['link']}' target='_blank' style='font-size:0.78rem; text-decoration:none; color:#796eff;'>Open ↗</a>"
+            if a.get("link") else ""
+        )
+        st.markdown(
+            f"<div style='padding:0.32rem 0.7rem; margin-bottom:0.22rem; border-radius:4px; "
+            f"background:#f7f8fb; border-left:3px solid #796eff; font-size:0.88rem;'>"
+            f"<b>{a['icon']} {a['title']}</b>{link_html}<br>"
+            f"<span style='color:#666; font-size:0.8rem;'>{a['detail']}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    if len(actions) > _ACTION_CAP:
+        st.caption(f"+ {len(actions) - _ACTION_CAP} more lower-priority actions (re-engage / start-conversation) — see Hot Deals & Qualified Leads below.")
+
+
+# ===========================================================================
+# 2) Critical KPIs
+# ===========================================================================
+st.markdown("#### Critical KPIs")
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    st.metric(
+        "Qualified leads", f"{n_qualified:,}",
+        delta=_fmt_delta(n_qualified, p_qualified),
+        help="Priority-segment ICP leads created this period: RIA + Broker-Dealer + WealthTech vendors (Fintech).",
+    )
+    st.caption(f"{n_ria} RIA · {n_bd} BD · {n_wt} WealthTech")
+with k2:
+    st.metric(
+        "Open pipeline", f"${open_pipeline_value:,.0f}",
+        delta=(f"{n_open_deals} open deals" if n_open_deals else "no deal data"),
+        delta_color="off",
+        help="Total dollar value of all open (not closed) deals. Requires crm.objects.deals.read scope.",
+    )
+with k3:
+    st.metric(
+        "Closing this period", f"{n_closing:,}",
+        delta=(f"${closing_value:,.0f} at stake" if n_closing else "none scheduled"),
+        delta_color="off",
+        help="Open deals with a close date inside the selected period.",
+    )
+with k4:
+    st.metric(
+        "Tasks overdue", f"{n_overdue:,}",
+        delta=f"{n_due_week} due in 7d",
+        delta_color="off",
+        help="Open tasks past their due date. Delta = tasks due within the next 7 days. Requires crm.objects.tasks.read scope.",
+    )
+
+
+# ===========================================================================
+# 3) 🔥 Hot Deals
+# ===========================================================================
+st.markdown("#### 🔥 Hot Deals — open deals ranked by value, close date & activity")
+if hot_deals.empty:
+    st.info(
+        "No open deals in the cache. If you expect deals here, confirm the "
+        "`crm.objects.deals.read` scope on the HubSpot Service Key, then refresh."
+    )
+else:
+    hd = hot_deals.head(12).copy()
+    hd["Deal"] = hd["name"]
+    hd["Company"] = hd["primary_company_id"].apply(lambda c: company_name_lookup.get(c) if c else None)
+    hd["Amount"] = hd["amount"].fillna(0)
+    hd["Stage"] = hd["stage_label"].fillna(hd["dealstage"])
+    hd["Close date"] = hd["closedate"].dt.date if "closedate" in hd.columns else None
+    hd["Days open"] = (now_ts - hd["createdate"]).dt.days if "createdate" in hd.columns else None
+    hd["Task due"] = hd["has_urgent_task"].map({True: "● due/overdue", False: ""})
+    hd["HubSpot"] = hd.apply(lambda r: _deal_url(r["id"], r.get("hubspot_url")), axis=1)
     st.dataframe(
-        ha_display, use_container_width=True, hide_index=True, height=320,
+        hd[["Deal", "Company", "Amount", "Stage", "Close date", "Days open", "Task due", "HubSpot"]],
+        use_container_width=True, hide_index=True, height=420,
         column_config={
+            "Deal": st.column_config.TextColumn(width="medium"),
             "Company": st.column_config.TextColumn(width="medium"),
-            "Contacts": st.column_config.NumberColumn(width="small", help="Distinct contacts at this firm who submitted a form in last 30d"),
-            "Engagements": st.column_config.NumberColumn(width="small", help="Total form submissions across all contacts at this firm in last 30d"),
-            "ICP": st.column_config.NumberColumn(width="small", help="How many of those contacts have ICP firm_type set"),
-            "Days since": st.column_config.NumberColumn(width="small", help="Days since the most recent engagement"),
+            "Amount": st.column_config.NumberColumn(format="$%d", width="small"),
+            "Days open": st.column_config.NumberColumn(width="small"),
+            "Task due": st.column_config.TextColumn(width="small", help="Has an active task overdue or due within 14 days"),
+            "HubSpot": st.column_config.LinkColumn("Open", display_text="Open ↗", width="small"),
         },
     )
 
-# ---- CRO Signals (deal-impact and pipeline health) ----
-header_cols = st.columns([0.85, 0.15])
-header_cols[0].markdown("**🔔 Pipeline Signals**")
-if not prior_comparison_trustworthy:
-    header_cols[1].caption(f"Prior comparisons off (pre-{trusted_from})")
 
-cro_sigs = _generate_cro_signals()
-_render_signals(cro_sigs, "No deal-impact signals today. Pipeline looks steady.")
-
-
-def _render_action_table(df: pd.DataFrame, columns_to_show: dict, height: int = 260) -> None:
-    """Render an actionable table with HubSpot deep-link column."""
-    company_lookup = (
-        companies.set_index("id")[["name", "domain"]].to_dict("index") if not companies.empty else {}
-    )
-    df = df.copy()
-    df["Company"] = df["company_id"].apply(
-        lambda c: company_lookup.get(c, {}).get("name") if c else None
-    )
-    df["HubSpot"] = df["hubspot_url"] if "hubspot_url" in df.columns else None
-    for col, label in columns_to_show.items():
-        if col not in df.columns:
-            df[col] = None
-    display = df[list(columns_to_show.keys()) + ["Company", "HubSpot"]].rename(columns=columns_to_show)
+# ===========================================================================
+# 4) 🎯 Qualified Leads
+# ===========================================================================
+st.markdown("#### 🎯 Qualified Leads — new RIA · Broker-Dealer · WealthTech in period")
+ql = in_period[in_period["lead_category"].isin(QUALIFIED_CATS)].copy()
+ql = ql[~ql["email"].apply(_is_excluded)]
+if ql.empty:
+    st.info("No qualified leads (RIA / Broker-Dealer / WealthTech) created in the selected period.")
+else:
+    ql = ql.sort_values("createdate", ascending=False).head(25)
+    ql["Created"] = ql["createdate"].dt.date
+    ql["Email"] = ql["email"]
+    ql["Company"] = ql["company_id"].apply(lambda c: company_name_lookup.get(c) if c else None)
+    ql["Category"] = ql["lead_category"]
+    ql["Source"] = ql["hs_analytics_source"]
+    ql["HubSpot"] = ql["id"].apply(_contact_url)
     st.dataframe(
-        display,
-        use_container_width=True, hide_index=True, height=height,
+        ql[["Created", "Email", "Company", "Category", "Source", "HubSpot"]],
+        use_container_width=True, hide_index=True, height=420,
         column_config={
+            "Email": st.column_config.TextColumn(width="medium"),
             "Company": st.column_config.TextColumn(width="medium"),
-            "HubSpot": st.column_config.LinkColumn("Open in HubSpot", display_text="Open ↗", width="small"),
+            "Category": st.column_config.TextColumn(width="small"),
+            "HubSpot": st.column_config.LinkColumn("Open", display_text="Open ↗", width="small"),
         },
     )
+    if int(in_period["lead_category"].isin(QUALIFIED_CATS).sum()) > 25:
+        st.caption(f"Showing 25 most recent of {n_qualified} qualified leads. Full list on the **Leads** page.")
 
-
-# ---- Multi-touch warm leads list ----
-if len(multi_touch_df) > 0:
-    with st.expander(f"💎 Multi-touch warm leads ({len(multi_touch_df)}) — open in HubSpot to start the conversation", expanded=True):
-        _render_action_table(
-            multi_touch_df,
-            columns_to_show={
-                "email": "Email",
-                "firm_type": "Firm type",
-                "_convs": "Conversions",
-                "_last_activity": "Last activity",
-                "first_conversion_event_name": "First form",
-                "recent_conversion_event_name": "Recent form",
-            },
-            height=min(80 + len(multi_touch_df) * 35, 320),
-        )
-
-# ---- Stalled leads list ----
-if len(stalled_leads_df) > 0:
-    with st.expander(f"⏰ Stalled leads ({len(stalled_leads_df)}) — last activity 45+ days ago", expanded=False):
-        _render_action_table(
-            stalled_leads_df,
-            columns_to_show={
-                "email": "Email",
-                "firm_type": "Firm type",
-                "_days_quiet": "Days quiet",
-                "_last_activity": "Last activity",
-                "_deals": "Deals",
-                "hs_lead_status": "Status",
-            },
-            height=min(80 + len(stalled_leads_df) * 35, 380),
-        )
-
-# ---- Data hygiene (classification noise, demoted) ----
-with st.expander("🧹 Data hygiene signals (classification, low priority)"):
-    hygiene_sigs = _generate_signals()
-    _render_signals(hygiene_sigs, "No classification issues right now.")
-
-with st.expander("What each signal means"):
-    st.markdown(
-        """
-**Pipeline Signals (top — deal-impact, CRO-grade)**
-- **🔥 Hot account** — 3+ distinct contacts at one ICP firm engaged in last 30 days. Book a discovery call before the moment passes.
-- **⏰ Stalled leads** — ICP contacts who had prior pipeline activity (deal opened, sales touch, or 2+ form fills) and have been quiet 45+ days. The list appears below.
-- **💎 Multi-touch warm** — ICP contacts with 3+ form fills and zero associated deals. Conversations someone should have started already. The list with HubSpot links appears below.
-- **📉 Pipeline drought** — rolling 4-week lead count down >30% vs. prior 4 weeks. Time to investigate.
-
-**Data hygiene (low priority, in expander)**
-- 💡 Classify-once domain spike — ≥5 unclassified contacts share a domain. One HubSpot edit, batch of N classified.
-- 🚨 Backlog grew, 🚨 Leads dropped, ⚠️ Form went dark, 🆕 Form debut, 📈/📉 Audience quality — period-over-period anomalies suppressed when prior period is pre-HubSpot.
-        """
-    )
-
-
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric(
-    "RIA leads",
-    f"{n_ria:,}",
-    delta=_fmt_delta(n_ria, p_ria),
-    help="ICP RIA contacts created in the selected period. Priority segment.",
+st.divider()
+st.caption(
+    "Detail moved to dedicated pages (left sidebar) → **Leads** · **Backlog** (classification cleanup) · "
+    "**Forms** · **LinkedIn** · **Content**. This page stays focused on what needs action now."
 )
-c2.metric(
-    "Broker-Dealer leads",
-    f"{n_bd:,}",
-    delta=_fmt_delta(n_bd, p_bd),
-    help="ICP Broker-Dealer contacts created in the selected period. Priority segment.",
-)
-c3.metric(
-    "Total leads",
-    f"{n_leads:,}",
-    delta=_fmt_delta(n_leads, p_leads),
-    help="All ICP contacts in the selected period (all 7 firm-type categories).",
-)
-c4.metric(
-    "Open deals · tasks due 7d",
-    f"{n_deals_due:,}",
-    delta=f"of {len(open_deals)} open" if not open_deals.empty else "no deal data",
-    delta_color="off",
-    help="Open deals that have at least one task due in the next 7 days. Requires crm.objects.deals.read scope on the HubSpot Service Key.",
-)
-c5.metric(
-    "Tasks due 7d",
-    f"{n_tasks_due:,}",
-    help="Total tasks due in the next 7 days (across all deals). Requires crm.objects.tasks.read scope.",
-)
-
-# Secondary operational row (less critical, kept for visibility)
-with st.expander("📋 Operational counts (backlog, total contacts, non-ICP, form fills)"):
-    sc1, sc2, sc3, sc4 = st.columns(4)
-    sc1.metric("Unclassified backlog", f"{n_unclassified:,}",
-               delta=_fmt_delta(n_unclassified, p_unclassified), delta_color="inverse",
-               help="Contacts with no firm_type set on either record. See Backlog page.")
-    sc2.metric("Total contacts", f"{n_contacts:,}", delta=_fmt_delta(n_contacts, p_contacts))
-    sc3.metric("Non-ICP", f"{n_non_lead:,}", delta=_fmt_delta(n_non_lead, p_non_lead), delta_color="off")
-    sc4.metric("Form submissions", f"{n_submissions:,}", delta=_fmt_delta(n_submissions, p_submissions),
-               help=f"{n_unique_fillers} unique people across {len(forms_df)} forms.")
-
-# ---- Featured form spotlights (real form-submission data) ----
-ai = _spotlight_for(subs_in_period, forms_df, "ai notetaker")
-env = _spotlight_for(subs_in_period, forms_df, "envestnet")
-nit = _spotlight_for(subs_in_period, forms_df, "nitrogen")
-
-ai_p = _spotlight_for(subs_in_prior, forms_df, "ai notetaker")
-env_p = _spotlight_for(subs_in_prior, forms_df, "envestnet")
-nit_p = _spotlight_for(subs_in_prior, forms_df, "nitrogen")
-
-f1, f2, f3 = st.columns(3)
-f1.metric(
-    "AI Notetakers — people",
-    f"{ai['people']:,}",
-    delta=_fmt_delta(ai['people'], ai_p['people']),
-    help=f"{ai['submissions']} submissions · {ai['leads']} leads · matched {ai['form_count']} form(s) with 'AI Notetaker' in the name. People = unique fillers in period.",
-)
-f2.metric(
-    "Envestnet case study — people",
-    f"{env['people']:,}",
-    delta=_fmt_delta(env['people'], env_p['people']),
-    help=f"{env['submissions']} submissions · {env['leads']} leads · matched {env['form_count']} form(s) with 'Envestnet' in the name.",
-)
-f3.metric(
-    "Nitrogen case study — people",
-    f"{nit['people']:,}",
-    delta=_fmt_delta(nit['people'], nit_p['people']),
-    help=f"{nit['submissions']} submissions · {nit['leads']} leads · matched {nit['form_count']} form(s) with 'Nitrogen' in the name.",
-)
-
-# ---- LinkedIn KPIs (period-bounded) ----
-linkedin_posts = load_linkedin_posts()
-if not linkedin_posts.empty:
-    li_in_period = linkedin_posts[
-        (linkedin_posts["published_at"] >= start_ts)
-        & (linkedin_posts["published_at"] < end_ts)
-    ].copy()
-    li_in_prior = linkedin_posts[
-        (linkedin_posts["published_at"] >= prior_start_ts)
-        & (linkedin_posts["published_at"] < prior_end_ts)
-    ].copy()
-
-    def _sum(df, col):
-        return int(df[col].fillna(0).sum()) if col in df.columns and not df.empty else 0
-
-    li_posts = len(li_in_period)
-    li_comments = _sum(li_in_period, "comment_count")
-    li_reactions = _sum(li_in_period, "reaction_count")
-    li_impressions = _sum(li_in_period, "impression_count")
-    li_followers = _sum(li_in_period, "followers_gained_count")
-
-    li_p_posts = len(li_in_prior)
-    li_p_comments = _sum(li_in_prior, "comment_count")
-    li_p_reactions = _sum(li_in_prior, "reaction_count")
-    li_p_impressions = _sum(li_in_prior, "impression_count")
-    li_p_followers = _sum(li_in_prior, "followers_gained_count")
-
-    st.markdown(f"**💼 LinkedIn — {start_date.strftime('%b %d')} – {end_date.strftime('%b %d, %Y')}**")
-    li1, li2, li3, li4, li5 = st.columns(5)
-    li1.metric("Posts", f"{li_posts:,}", delta=_fmt_delta(li_posts, li_p_posts))
-    li2.metric("Impressions", f"{li_impressions:,}", delta=_fmt_delta(li_impressions, li_p_impressions))
-    li3.metric("Comments", f"{li_comments:,}", delta=_fmt_delta(li_comments, li_p_comments),
-               help="Comments are the highest-signal engagement metric for B2B outreach. See LinkedIn page for per-post detail.")
-    li4.metric("Reactions", f"{li_reactions:,}", delta=_fmt_delta(li_reactions, li_p_reactions))
-    li5.metric("Followers gained", f"{li_followers:,}", delta=_fmt_delta(li_followers, li_p_followers))
-
-
-# ---- Chart (left half) + Forms table (right half) ----
-left, right = st.columns([1, 1])
-
-with left:
-    st.markdown("**Leads by week**")
-    if n_leads > 0:
-        leads_only = in_period[in_period["lead_status"] == "lead"].copy()
-        leads_only["week"] = leads_only["createdate"].dt.to_period("W").dt.start_time
-        weekly = (
-            leads_only.groupby(["week", "lead_category"])
-            .size()
-            .reset_index(name="leads")
-        )
-        fig = px.bar(
-            weekly, x="week", y="leads", color="lead_category",
-            category_orders={"lead_category": LEAD_CATEGORIES},
-        )
-        fig.update_layout(
-            height=380,
-            margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_title=None, yaxis_title="Leads",
-            legend_title=None,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No leads in the selected period.")
-
-with right:
-    st.markdown("**Forms — by submissions**")
-    forms_table = _per_form_aggregate(subs_in_period, forms_df)
-    if forms_table.empty:
-        st.info("No form submissions in the selected period.")
-    else:
-        st.dataframe(
-            forms_table,
-            use_container_width=True,
-            hide_index=True,
-            height=380,
-            column_config={
-                "Form": st.column_config.TextColumn(width="medium"),
-                "Subs": st.column_config.NumberColumn(width="small"),
-                "Leads": st.column_config.NumberColumn(width="small"),
-                "%": st.column_config.NumberColumn(format="%.0f%%", width="small"),
-            },
-        )
-
-# ---- Leads by source (full width, smaller) ----
-st.markdown("**Leads by HubSpot original source**")
-if n_leads > 0:
-    leads_only = in_period[in_period["lead_status"] == "lead"].copy()
-    by_source = (
-        leads_only["hs_analytics_source"]
-        .fillna("(unknown)")
-        .value_counts()
-        .reset_index()
-    )
-    by_source.columns = ["source", "leads"]
-    fig = px.bar(by_source, x="source", y="leads")
-    fig.update_layout(
-        height=260,
-        margin=dict(l=10, r=10, t=10, b=10),
-        xaxis_title=None, yaxis_title="Leads",
-    )
-    st.plotly_chart(fig, use_container_width=True)

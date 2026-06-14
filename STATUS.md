@@ -1,6 +1,6 @@
 # STATUS — EG Marketing Dashboard
 
-Last updated: 2026-06-13
+Last updated: 2026-06-14
 
 ## Where things live
 
@@ -19,28 +19,32 @@ Last updated: 2026-06-13
 - **WordPress REST API** — WealthTechToday.com posts (post metadata; Jetpack stats optional)
 
 ### Pages
-- **Marketing Overview** (`app.py`) — Hot Accounts table, Pipeline Signals, CRO KPIs, charts, forms table, LinkedIn KPIs
+- **Marketing Command Center** (`app.py`) — exception-based, deal-focused Overview (redesigned 2026-06-14). Top to bottom: header w/ Asana 90-Day Strategy link → **⚡ Do This Now** action queue → 4 Critical KPIs → **🔥 Hot Deals** → **🎯 Qualified Leads**. All secondary content (form spotlights, LinkedIn KPIs, source/week charts, operational counts, hygiene signals) was removed from the Overview and lives on the sub-pages.
 - **Leads** (`pages/1_Leads.py`) — filterable lead list
 - **Backlog** (`pages/2_Backlog.py`) — unclassified contacts to triage
 - **Forms** (`pages/3_Forms.py`) — per-form drill-down with CSV export
 - **LinkedIn** (`pages/4_LinkedIn.py`) — top posts by comments/engagement, posting cadence
 - **Content** (`pages/5_Content.py`) — WordPress posts table + cadence chart
 
-### Headline KPIs (current as of 2026-05-21)
-- RIA leads (period)
-- Broker-Dealer leads (period)
-- Total leads (period)
-- Open deals · tasks due 7d
-- Tasks due 7d
-- (Operational expander) Unclassified backlog, Total contacts, Non-ICP, Form submissions
+### Critical KPIs (current as of 2026-06-14)
+- **Qualified leads** — RIA + Broker-Dealer + WealthTech vendors (Fintech), with a `X RIA · Y BD · Z WealthTech` breakdown
+- **Open pipeline $** (+ open-deal count)
+- **Closing this period** (count + $ at stake)
+- **Tasks overdue** (+ tasks due in 7d)
 
-### Pipeline Signals (deal-impact, CRO-grade)
-- 🔥 Hot account (3+ contacts at one ICP firm engaged in 30d)
-- ⏰ Stalled leads (had pipeline activity, 45+ days quiet)
-- 💎 Multi-touch warm leads (3+ form fills, zero deals)
-- 📉 Pipeline drought (rolling 4-week lead count down >30%)
+### ⚡ Do This Now — exception-based action queue
+A single ranked list of only the items needing action, each with a HubSpot/Asana deep link. Priority order:
+1. 🚨 Overdue tasks → linked to associated deal
+2. 🔥 Hot accounts to call (3+ contacts at one ICP firm engaged in 30d) → company
+3. 💰 Open deals closing this period → deal
+4. 📌 Tasks due in next 7 days
+5. ⏰ Stalled leads (prior pipeline activity, 45+ days quiet) → contact
+6. 💎 Multi-touch warm leads (3+ form fills, zero deals) → contact
 
-Each signal has a dismiss checkbox; dismissals expire end-of-day.
+Caps at 12 with a "+N more" note; shows "✅ You're clear" when nothing is urgent.
+
+### 🔥 Hot Deals
+Open deals ranked by a blended score: **value 0.5 · close-date proximity 0.3 · activity 0.2**. "Activity" = has an active HubSpot task overdue or due within 14 days. Columns: Deal, Company, Amount, Stage, Close date, Days open, Task-due flag, HubSpot link.
 
 ## What's NOT done / known gaps
 
@@ -152,6 +156,10 @@ Edit these in `app.py` directly as new internal/vendor/partner contacts surface.
 | 2026-06-13 | Fixed open-deals KPI to use pipeline-stage `isClosed` metadata | Portal uses custom numeric stage IDs; old `closedwon`/`closedlost` literals matched nothing → all 718 deals shown as open (now 46 open / 672 closed) |
 | 2026-06-13 | Pinned `requirements.txt` to verified majors | pandas 3.0 / streamlit 1.58 verified working; upper bounds guard against next-major drift |
 | 2026-06-13 | Local venv must be built on Homebrew `python3.12` | Original venv's Python 3.12.0 framework was removed from the Mac, breaking it; system python3 is 3.9 (too old) |
+| 2026-06-14 | Redesigned Overview → exception-based "Marketing Command Center" | Craig: too many fluff numbers. New layout: ⚡ Do This Now action queue → 4 critical KPIs → Hot Deals → Qualified Leads. Secondary content removed from Overview (kept on sub-pages). |
+| 2026-06-14 | "Qualified leads" = RIA + Broker-Dealer + WealthTech (Fintech) | Craig's priority segments. WealthTech vendors = `fintech` firm_type. Drives the headline Qualified-leads KPI + the Qualified Leads table. |
+| 2026-06-14 | Hot Deals score = value 0.5 · close-date 0.3 · activity 0.2 | Open deals only; activity = active task overdue/due within 14d. Replaces the old "deals are just a count" treatment. |
+| 2026-06-14 | Added Asana link to 90-Day Marketing Strategy | Header button → `90-Day Marketing Demand Generation Plan` (project `1214458328037729`). Hardcoded `ASANA_STRATEGY_URL` in `app.py`. |
 
 ## Open items / next session ideas
 
