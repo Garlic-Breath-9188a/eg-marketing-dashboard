@@ -164,6 +164,8 @@ Edit these in `app.py` directly as new internal/vendor/partner contacts surface.
 | 2026-06-14 | Closed deals: also trust the stage *label* | A custom-pipeline "Closed Lost" stage wasn't flagging `metadata.isClosed`, so Closed Lost deals (Dynasty, AssetMark) leaked into open deals / "closing this period." `_open_deals()` now ORs `stage_is_closed`, a "closed" substring in `stage_label`, and the legacy literal. |
 | 2026-06-14 | HubSpot record links use canonical `/record/{type}/{id}` w/ portal ID | The `/contacts/_/company/{id}` shortcut didn't resolve. Now build `/contacts/{portalId}/record/0-1\|0-2\|0-3/{id}`. Portal ID from `HUBSPOT_PORTAL_ID` secret → cache meta (auto-fetched at ingest via `/account-info/v3/details`) → legacy `/_/` fallback. |
 | 2026-06-14 | Task action links → Asana search by name | HubSpot tasks have no Asana ID, so overdue/due task rows link to `app.asana.com/0/search?q=<subject>` ("Edit in Asana ↗"). Craig manages tasks in Asana. |
+| 2026-06-14 | Open/closed driven by per-deal `hs_is_closed`, not pipeline metadata | The `/crm/v3/pipelines/deals` isClosed approach left `stage_is_closed` NULL → all 718 deals counted as open. Now ingest pulls `hs_is_closed` / `hs_is_closed_won` (reliable computed props). Verified via HubSpot: **46 open / 671 closed**. Dashboard also falls back to known closed stage IDs so it's correct on pre-refresh caches. **Re-refresh after deploy to populate the new props.** |
+| 2026-06-14 | Portal ID hardcoded default `50726076` | Confirmed from live HubSpot record URLs. Makes deep-links resolve without waiting on the `/account-info` fetch; still overridable via `HUBSPOT_PORTAL_ID` secret. |
 
 ## Open items / next session ideas
 

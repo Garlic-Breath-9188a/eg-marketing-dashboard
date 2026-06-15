@@ -49,6 +49,8 @@ DEAL_PROPS = [
     "closedate",
     "createdate",
     "hubspot_owner_id",
+    "hs_is_closed",       # per-deal computed flag — reliable across all custom pipelines
+    "hs_is_closed_won",
 ]
 
 TASK_PROPS = [
@@ -400,14 +402,21 @@ def refresh(token: str, progress=None) -> dict:
         contacts_assoc = assoc.get("contacts", {}).get("results", [])
         companies_assoc = assoc.get("companies", {}).get("results", [])
         ds = props.get("dealstage")
-        if stage_meta:
-            sm = stage_meta.get(ds) or {}
-            stage_is_closed = 1 if sm.get("is_closed") else 0
-            stage_is_won = 1 if sm.get("is_won") else 0
-            stage_label = sm.get("label")
+        sm = (stage_meta.get(ds) or {}) if stage_meta else {}
+        # Closed/won come from the per-deal computed flags, which are reliable across
+        # every custom pipeline (the pipeline-stage isClosed metadata is not). Fall back
+        # to stage metadata only if the per-deal flag is somehow absent.
+        hs_closed = props.get("hs_is_closed")
+        hs_won = props.get("hs_is_closed_won")
+        if hs_closed not in (None, ""):
+            stage_is_closed = 1 if str(hs_closed).lower() == "true" else 0
         else:
-            # No stage metadata available — leave NULL so the dashboard falls back.
-            stage_is_closed = stage_is_won = stage_label = None
+            stage_is_closed = (1 if sm.get("is_closed") else 0) if stage_meta else None
+        if hs_won not in (None, ""):
+            stage_is_won = 1 if str(hs_won).lower() == "true" else 0
+        else:
+            stage_is_won = (1 if sm.get("is_won") else 0) if stage_meta else None
+        stage_label = sm.get("label")  # for display only
         deal_rows.append({
             "id": d["id"],
             "name": props.get("dealname"),

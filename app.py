@@ -306,7 +306,7 @@ def _asana_search_url(query) -> str | None:
 # meta (auto-populated at ingest), else fall back to the legacy /_/ shortcut.
 HUBSPOT_PORTAL_BASE = st.secrets.get("HUBSPOT_PORTAL_BASE", "https://app.hubspot.com")
 HUBSPOT_PORTAL_ID = str(
-    st.secrets.get("HUBSPOT_PORTAL_ID", "") or db.get_meta("hubspot_portal_id") or ""
+    st.secrets.get("HUBSPOT_PORTAL_ID", "") or db.get_meta("hubspot_portal_id") or "50726076"
 ).strip()
 
 
@@ -573,13 +573,22 @@ def _build_multi_touch_warm() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Deals + tasks: open pipeline, hot-deal scoring, task urgency
 # ---------------------------------------------------------------------------
-CLOSED_STAGES = {"closedwon", "closedlost"}  # legacy fallback for pre-metadata caches
+CLOSED_STAGES = {"closedwon", "closedlost"}  # legacy default-pipeline literals
+# Known Closed Won/Lost stage IDs across this portal's 3 pipelines (WTIS,
+# Vendor/Research, Wealth Management). Fallback so caches refreshed before the
+# per-deal hs_is_closed flag was ingested still filter closed deals correctly.
+CLOSED_STAGE_IDS = {
+    "1317293194", "1317293195",
+    "1317544073", "1317544074",
+    "1317694355", "1317694356",
+}
 
 
 def _open_deals() -> pd.DataFrame:
-    """Open = not closed. OR together every closed-signal we have: custom pipelines
-    sometimes ship a "Closed Won/Lost" stage whose metadata.isClosed flag is NOT set,
-    so an explicit "closed" stage label (or the legacy literal) is trusted on its own.
+    """Open = not closed. The authoritative signal is the per-deal hs_is_closed flag
+    (stored as stage_is_closed). We also OR in every fallback we have — "closed" stage
+    label, known closed stage IDs, legacy literals — so caches predating the flag still
+    exclude closed deals correctly.
     """
     if deals_df.empty:
         return pd.DataFrame()
@@ -588,7 +597,8 @@ def _open_deals() -> pd.DataFrame:
     if "stage_label" in df.columns:
         closed = closed | df["stage_label"].fillna("").str.contains("closed", case=False, na=False)
     if "dealstage" in df.columns:
-        closed = closed | df["dealstage"].fillna("").str.lower().isin(CLOSED_STAGES)
+        ds = df["dealstage"].fillna("").astype(str)
+        closed = closed | ds.str.lower().isin(CLOSED_STAGES) | ds.isin(CLOSED_STAGE_IDS)
     return df[~closed].copy()
 
 
