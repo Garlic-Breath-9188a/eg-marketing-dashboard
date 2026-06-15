@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -288,24 +289,47 @@ with st.sidebar:
 ASANA_STRATEGY_URL = "https://app.asana.com/1/1182309086818187/project/1214458328037729"
 ASANA_STRATEGY_NAME = "90-Day Marketing Demand Generation Plan"
 
+
+def _asana_search_url(query) -> str | None:
+    """Asana search deep-link for a task subject — HubSpot tasks have no Asana ID,
+    so we open a search for the task name to land on the matching Asana task to edit."""
+    q = (str(query) if query is not None else "").strip()
+    if not q:
+        return ASANA_STRATEGY_URL
+    return f"https://app.asana.com/0/search?q={quote(q)}"
+
 # Constructed HubSpot record URLs. Contacts/companies/deals don't return a record
-# URL from the v3 API, so we build the /_/ shortcut links (HubSpot resolves the
-# active portal). Override the base via the HUBSPOT_PORTAL_BASE secret if needed.
+# URL from the v3 API, so we build canonical deep links:
+#   {base}/contacts/{portalId}/record/{objectTypeId}/{recordId}
+# (objectTypeId: 0-1 contact, 0-2 company, 0-3 deal). The portal ID is required for
+# the link to resolve — read it from the HUBSPOT_PORTAL_ID secret, else from cache
+# meta (auto-populated at ingest), else fall back to the legacy /_/ shortcut.
 HUBSPOT_PORTAL_BASE = st.secrets.get("HUBSPOT_PORTAL_BASE", "https://app.hubspot.com")
+HUBSPOT_PORTAL_ID = str(
+    st.secrets.get("HUBSPOT_PORTAL_ID", "") or db.get_meta("hubspot_portal_id") or ""
+).strip()
+
+
+def _record_url(object_type_id: str, rid, legacy_path: str) -> str | None:
+    if not rid:
+        return None
+    if HUBSPOT_PORTAL_ID:
+        return f"{HUBSPOT_PORTAL_BASE}/contacts/{HUBSPOT_PORTAL_ID}/record/{object_type_id}/{rid}"
+    return f"{HUBSPOT_PORTAL_BASE}/contacts/_/{legacy_path}/{rid}"
 
 
 def _contact_url(cid) -> str | None:
-    return f"{HUBSPOT_PORTAL_BASE}/contacts/_/contact/{cid}" if cid else None
+    return _record_url("0-1", cid, "contact")
 
 
 def _company_url(cid) -> str | None:
-    return f"{HUBSPOT_PORTAL_BASE}/contacts/_/company/{cid}" if cid else None
+    return _record_url("0-2", cid, "company")
 
 
 def _deal_url(deal_id, stored_url=None) -> str | None:
     if stored_url:
         return stored_url
-    return f"{HUBSPOT_PORTAL_BASE}/contacts/_/deal/{deal_id}" if deal_id else None
+    return _record_url("0-3", deal_id, "deal")
 
 
 # ---- Header: title + Asana strategy link ----
@@ -553,13 +577,19 @@ CLOSED_STAGES = {"closedwon", "closedlost"}  # legacy fallback for pre-metadata 
 
 
 def _open_deals() -> pd.DataFrame:
+    """Open = not closed. OR together every closed-signal we have: custom pipelines
+    sometimes ship a "Closed Won/Lost" stage whose metadata.isClosed flag is NOT set,
+    so an explicit "closed" stage label (or the legacy literal) is trusted on its own.
+    """
     if deals_df.empty:
         return pd.DataFrame()
-    if deals_df["stage_is_closed"].notna().any():
-        return deals_df[deals_df["stage_is_closed"].fillna(0).astype(int) == 0].copy()
-    if "dealstage" in deals_df.columns:
-        return deals_df[~deals_df["dealstage"].fillna("").str.lower().isin(CLOSED_STAGES)].copy()
-    return pd.DataFrame()
+    df = deals_df
+    closed = df["stage_is_closed"].fillna(0).astype(int) == 1
+    if "stage_label" in df.columns:
+        closed = closed | df["stage_label"].fillna("").str.contains("closed", case=False, na=False)
+    if "dealstage" in df.columns:
+        closed = closed | df["dealstage"].fillna("").str.lower().isin(CLOSED_STAGES)
+    return df[~closed].copy()
 
 
 def _active_tasks(df: pd.DataFrame) -> pd.DataFrame:
@@ -599,15 +629,8 @@ else:
 
 urgent_deal_ids = _deal_ids_with_urgent_tasks(active_tasks)
 
-# Deal lookups for action links + company names
+# Company-name lookup for the deal + lead tables
 company_name_lookup = companies.set_index("id")["name"].to_dict() if not companies.empty else {}
-deal_lookup: dict[str, dict] = {}
-if not deals_df.empty:
-    for _, d in deals_df.iterrows():
-        deal_lookup[str(d["id"])] = {
-            "name": d.get("name"),
-            "url": _deal_url(d["id"], d.get("hubspot_url")),
-        }
 
 # Hot deals: blended score (value 0.5 · close-date proximity 0.3 · activity 0.2)
 if not open_deals.empty:
@@ -669,15 +692,6 @@ n_due_week = len(tasks_due_week)
 # ===========================================================================
 # 1) ⚡ DO THIS NOW — exception-based action queue
 # ===========================================================================
-def _task_link(t) -> str | None:
-    ids = t.get("associated_deal_ids")
-    if ids:
-        first = str(ids).split(",")[0].strip()
-        if first in deal_lookup:
-            return deal_lookup[first]["url"]
-    return None
-
-
 actions: list[dict] = []
 
 # Priority 1 — overdue tasks (already late)
@@ -692,7 +706,8 @@ if not overdue_tasks.empty:
             "priority": 1, "icon": "🚨",
             "title": f"Overdue task: {t.get('subject') or '(no subject)'}",
             "detail": detail,
-            "link": _task_link(t),
+            "link": _asana_search_url(t.get("subject")),
+            "link_label": "Edit in Asana ↗",
         })
 
 # Priority 2 — hot accounts to call (3+ contacts engaged)
@@ -727,7 +742,8 @@ if not tasks_due_week.empty:
             "priority": 4, "icon": "📌",
             "title": f"Task due: {t.get('subject') or '(no subject)'}",
             "detail": f"due {due.strftime('%b %d') if pd.notna(due) else 'soon'}",
-            "link": _task_link(t),
+            "link": _asana_search_url(t.get("subject")),
+            "link_label": "Edit in Asana ↗",
         })
 
 # Priority 5 — stalled leads to re-engage
@@ -762,7 +778,7 @@ else:
     actions.sort(key=lambda a: a["priority"])
     for a in actions[:_ACTION_CAP]:
         link_html = (
-            f" <a href='{a['link']}' target='_blank' style='font-size:0.78rem; text-decoration:none; color:#796eff;'>Open ↗</a>"
+            f" <a href='{a['link']}' target='_blank' style='font-size:0.78rem; text-decoration:none; color:#796eff;'>{a.get('link_label', 'Open ↗')}</a>"
             if a.get("link") else ""
         )
         st.markdown(

@@ -100,6 +100,7 @@ git config user.name "Craig Iskowitz"
 | Key | Required? | Where to get |
 |---|---|---|
 | `HUBSPOT_TOKEN` | Yes | HubSpot → Settings → Integrations → Service Keys |
+| `HUBSPOT_PORTAL_ID` | Optional | Makes record deep-links resolve instantly. The number in any HubSpot URL: `app.hubspot.com/contacts/{THIS}/…`. Auto-fetched at ingest if omitted. |
 | `AUTHOREDUP_API_KEY` | Yes (for LinkedIn) | AuthoredUp web app → Settings → API Access |
 | `DASHBOARD_PASSWORD` | Yes | You set it — what you share with viewers |
 | `WORDPRESS_BASE_URL` | Yes (for Content tab) | `https://wealthtechtoday.com` |
@@ -160,6 +161,9 @@ Edit these in `app.py` directly as new internal/vendor/partner contacts surface.
 | 2026-06-14 | "Qualified leads" = RIA + Broker-Dealer + WealthTech (Fintech) | Craig's priority segments. WealthTech vendors = `fintech` firm_type. Drives the headline Qualified-leads KPI + the Qualified Leads table. |
 | 2026-06-14 | Hot Deals score = value 0.5 · close-date 0.3 · activity 0.2 | Open deals only; activity = active task overdue/due within 14d. Replaces the old "deals are just a count" treatment. |
 | 2026-06-14 | Added Asana link to 90-Day Marketing Strategy | Header button → `90-Day Marketing Demand Generation Plan` (project `1214458328037729`). Hardcoded `ASANA_STRATEGY_URL` in `app.py`. |
+| 2026-06-14 | Closed deals: also trust the stage *label* | A custom-pipeline "Closed Lost" stage wasn't flagging `metadata.isClosed`, so Closed Lost deals (Dynasty, AssetMark) leaked into open deals / "closing this period." `_open_deals()` now ORs `stage_is_closed`, a "closed" substring in `stage_label`, and the legacy literal. |
+| 2026-06-14 | HubSpot record links use canonical `/record/{type}/{id}` w/ portal ID | The `/contacts/_/company/{id}` shortcut didn't resolve. Now build `/contacts/{portalId}/record/0-1\|0-2\|0-3/{id}`. Portal ID from `HUBSPOT_PORTAL_ID` secret → cache meta (auto-fetched at ingest via `/account-info/v3/details`) → legacy `/_/` fallback. |
+| 2026-06-14 | Task action links → Asana search by name | HubSpot tasks have no Asana ID, so overdue/due task rows link to `app.asana.com/0/search?q=<subject>` ("Edit in Asana ↗"). Craig manages tasks in Asana. |
 
 ## Open items / next session ideas
 

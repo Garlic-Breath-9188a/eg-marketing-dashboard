@@ -82,6 +82,20 @@ class HubSpotClient:
         resp.raise_for_status()
         return {}
 
+    def get_portal_id(self) -> str | None:
+        """Return the HubSpot portal (hub) ID, used to build record deep-links.
+
+        Degrades to None if the account-info scope isn't granted (401/403).
+        """
+        try:
+            data = self._get("/account-info/v3/details")
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code in (401, 403):
+                return None
+            raise
+        pid = data.get("portalId")
+        return str(pid) if pid else None
+
     def iter_contacts(self) -> Iterator[dict]:
         """Yield raw contact objects with companies association."""
         after = None
@@ -273,6 +287,11 @@ def refresh(token: str, progress=None) -> dict:
     db.init_db()
     client = HubSpotClient(token)
     fetched_at = db.now_iso()
+
+    # Portal ID powers record deep-links in the dashboard. Best-effort; degrades silently.
+    portal_id = client.get_portal_id()
+    if portal_id:
+        db.set_meta("hubspot_portal_id", portal_id)
 
     if progress:
         progress("Contacts", 0, 0)
