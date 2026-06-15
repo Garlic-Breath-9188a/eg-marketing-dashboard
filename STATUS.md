@@ -166,6 +166,8 @@ Edit these in `app.py` directly as new internal/vendor/partner contacts surface.
 | 2026-06-14 | Task action links → Asana search by name | HubSpot tasks have no Asana ID, so overdue/due task rows link to `app.asana.com/0/search?q=<subject>` ("Edit in Asana ↗"). Craig manages tasks in Asana. |
 | 2026-06-14 | Open/closed driven by per-deal `hs_is_closed`, not pipeline metadata | The `/crm/v3/pipelines/deals` isClosed approach left `stage_is_closed` NULL → all 718 deals counted as open. Now ingest pulls `hs_is_closed` / `hs_is_closed_won` (reliable computed props). Verified via HubSpot: **46 open / 671 closed**. Dashboard also falls back to known closed stage IDs so it's correct on pre-refresh caches. **Re-refresh after deploy to populate the new props.** |
 | 2026-06-14 | Portal ID hardcoded default `50726076` | Confirmed from live HubSpot record URLs. Makes deep-links resolve without waiting on the `/account-info` fetch; still overridable via `HUBSPOT_PORTAL_ID` secret. |
+| 2026-06-14 | Task links → HubSpot, NOT Asana (reverses earlier call) | The action-queue tasks are 440 real HubSpot sales tasks, not Asana items — searching Asana by name found nothing. Task rows now link to `/tasks/{portalId}/view/all/task/{id}` ("Open in HubSpot ↗"). The Asana header button (90-Day marketing *plan*) is unrelated and stays. |
+| 2026-06-14 | Filter out HubSpot "(Sample task)" demo data | New portals ship sample tasks/contacts; "(Sample task) Follow up with Brian" etc. were polluting the overdue queue. `_active_tasks()` drops any subject starting with "(Sample task)". |
 
 ## Open items / next session ideas
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -289,15 +288,6 @@ with st.sidebar:
 ASANA_STRATEGY_URL = "https://app.asana.com/1/1182309086818187/project/1214458328037729"
 ASANA_STRATEGY_NAME = "90-Day Marketing Demand Generation Plan"
 
-
-def _asana_search_url(query) -> str | None:
-    """Asana search deep-link for a task subject — HubSpot tasks have no Asana ID,
-    so we open a search for the task name to land on the matching Asana task to edit."""
-    q = (str(query) if query is not None else "").strip()
-    if not q:
-        return ASANA_STRATEGY_URL
-    return f"https://app.asana.com/0/search?q={quote(q)}"
-
 # Constructed HubSpot record URLs. Contacts/companies/deals don't return a record
 # URL from the v3 API, so we build canonical deep links:
 #   {base}/contacts/{portalId}/record/{objectTypeId}/{recordId}
@@ -330,6 +320,11 @@ def _deal_url(deal_id, stored_url=None) -> str | None:
     if stored_url:
         return stored_url
     return _record_url("0-3", deal_id, "deal")
+
+
+def _task_url(task_id) -> str | None:
+    # Tasks use a dedicated route (not /record/). Format confirmed for this portal.
+    return f"{HUBSPOT_PORTAL_BASE}/tasks/{HUBSPOT_PORTAL_ID}/view/all/task/{task_id}" if task_id else None
 
 
 # ---- Header: title + Asana strategy link ----
@@ -605,7 +600,11 @@ def _open_deals() -> pd.DataFrame:
 def _active_tasks(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "status" not in df.columns or "due_at" not in df.columns:
         return pd.DataFrame()
-    return df[~df["status"].fillna("").str.upper().isin({"COMPLETED", "DEFERRED"})].copy()
+    out = df[~df["status"].fillna("").str.upper().isin({"COMPLETED", "DEFERRED"})].copy()
+    # Drop HubSpot's built-in demo data ("(Sample task) …") — not real work.
+    if "subject" in out.columns:
+        out = out[~out["subject"].fillna("").str.startswith("(Sample task)")]
+    return out
 
 
 def _deal_ids_with_urgent_tasks(active: pd.DataFrame, horizon_days: int = 14) -> set[str]:
@@ -716,8 +715,8 @@ if not overdue_tasks.empty:
             "priority": 1, "icon": "🚨",
             "title": f"Overdue task: {t.get('subject') or '(no subject)'}",
             "detail": detail,
-            "link": _asana_search_url(t.get("subject")),
-            "link_label": "Edit in Asana ↗",
+            "link": _task_url(t.get("id")),
+            "link_label": "Open in HubSpot ↗",
         })
 
 # Priority 2 — hot accounts to call (3+ contacts engaged)
@@ -752,8 +751,8 @@ if not tasks_due_week.empty:
             "priority": 4, "icon": "📌",
             "title": f"Task due: {t.get('subject') or '(no subject)'}",
             "detail": f"due {due.strftime('%b %d') if pd.notna(due) else 'soon'}",
-            "link": _asana_search_url(t.get("subject")),
-            "link_label": "Edit in Asana ↗",
+            "link": _task_url(t.get("id")),
+            "link_label": "Open in HubSpot ↗",
         })
 
 # Priority 5 — stalled leads to re-engage
