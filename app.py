@@ -726,9 +726,10 @@ if not hot_accounts_df.empty:
         name = r.get("company_name") or r.get("company_domain") or r["company_id"]
         actions.append({
             "priority": 2, "icon": "🔥",
-            "title": f"Call {name}",
-            "detail": f"{int(r['contacts_engaged'])} contacts engaged · {int(r['submissions'])} fills in {HEAT_WINDOW_DAYS}d · last touch {int(r['days_since'])}d ago",
+            "title": f"Hot account: {name} — reach out",
+            "detail": f"{int(r['contacts_engaged'])} contacts engaged · {int(r['submissions'])} form fills in {HEAT_WINDOW_DAYS}d · last touch {int(r['days_since'])}d ago",
             "link": _company_url(r["company_id"]),
+            "link_label": "View company ↗",
         })
 
 # Priority 3 — open deals closing this period
@@ -741,6 +742,7 @@ if not closing_period.empty:
             "title": f"Advance to close: {d.get('name') or '(unnamed deal)'}",
             "detail": f"${amt:,.0f} · {d.get('stage_label') or d.get('dealstage') or 'stage n/a'} · closes {cd.strftime('%b %d') if pd.notna(cd) else 'TBD'}",
             "link": _deal_url(d["id"], d.get("hubspot_url")),
+            "link_label": "View deal ↗",
         })
 
 # Priority 4 — tasks due in the next 7 days
@@ -762,6 +764,7 @@ for _, c in stalled_leads_df.head(5).iterrows():
         "title": f"Re-engage {c.get('email') or '(no email)'}",
         "detail": f"{c.get('lead_category') or c.get('firm_type') or 'ICP'} · quiet {int(c['_days_quiet'])}d · had prior pipeline activity",
         "link": _contact_url(c["id"]),
+        "link_label": "View contact ↗",
     })
 
 # Priority 6 — multi-touch warm leads with no deal
@@ -771,6 +774,7 @@ for _, c in multi_touch_df.head(5).iterrows():
         "title": f"Start the conversation: {c.get('email') or '(no email)'}",
         "detail": f"{int(c['_convs'])} form fills · zero deals · {c.get('lead_category') or c.get('firm_type') or 'ICP'}",
         "link": _contact_url(c["id"]),
+        "link_label": "View contact ↗",
     })
 
 st.markdown("#### ⚡ Do This Now")

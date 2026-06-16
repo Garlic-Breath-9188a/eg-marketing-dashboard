@@ -436,6 +436,14 @@ def refresh(token: str, progress=None) -> dict:
         })
     db.upsert_deals(deal_rows)
 
+    # Prune deals deleted in HubSpot. Guard against a truncated/failed pull (or a
+    # missing scope, which yields zero rows) by only pruning when the fresh set is
+    # non-empty and at least half the existing count.
+    deal_ids = {r["id"] for r in deal_rows}
+    existing_deals = db.count_deals()
+    if deal_ids and (existing_deals == 0 or len(deal_ids) >= existing_deals * 0.5):
+        db.delete_deals_not_in(deal_ids)
+
     # Tasks (requires crm.objects.tasks.read or engagements scope)
     if progress:
         progress("Tasks", 0, 0)
@@ -459,6 +467,12 @@ def refresh(token: str, progress=None) -> dict:
             "fetched_at": fetched_at,
         })
     db.upsert_tasks(task_rows)
+
+    # Prune tasks deleted in HubSpot (same guard as deals).
+    task_ids = {r["id"] for r in task_rows}
+    existing_tasks = db.count_tasks()
+    if task_ids and (existing_tasks == 0 or len(task_ids) >= existing_tasks * 0.5):
+        db.delete_tasks_not_in(task_ids)
 
     db.set_meta("last_full_refresh", fetched_at)
     return {

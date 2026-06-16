@@ -322,6 +322,42 @@ def count_contacts() -> int:
         return int(row["n"])
 
 
+def _count(table: str) -> int:
+    with connect() as conn:
+        row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+        return int(row["n"])
+
+
+def count_deals() -> int:
+    return _count("deals")
+
+
+def count_tasks() -> int:
+    return _count("tasks")
+
+
+def _delete_not_in(table: str, ids: set[str]) -> int:
+    """Delete rows in `table` whose id is NOT in the given set (removes records
+    deleted/archived in HubSpot since the last pull). Returns rows deleted."""
+    if not ids:
+        return 0
+    with connect() as conn:
+        placeholders = ",".join("?" for _ in ids)
+        result = conn.execute(
+            f"DELETE FROM {table} WHERE id NOT IN ({placeholders})",
+            tuple(ids),
+        )
+        return result.rowcount
+
+
+def delete_deals_not_in(ids: set[str]) -> int:
+    return _delete_not_in("deals", ids)
+
+
+def delete_tasks_not_in(ids: set[str]) -> int:
+    return _delete_not_in("tasks", ids)
+
+
 def dismiss_signal(signal_key: str, dismissed_on: str) -> None:
     """Mark a signal as dismissed for the given date (YYYY-MM-DD)."""
     with connect() as conn:

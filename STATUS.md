@@ -168,6 +168,8 @@ Edit these in `app.py` directly as new internal/vendor/partner contacts surface.
 | 2026-06-14 | Portal ID hardcoded default `50726076` | Confirmed from live HubSpot record URLs. Makes deep-links resolve without waiting on the `/account-info` fetch; still overridable via `HUBSPOT_PORTAL_ID` secret. |
 | 2026-06-14 | Task links → HubSpot, NOT Asana (reverses earlier call) | The action-queue tasks are 440 real HubSpot sales tasks, not Asana items — searching Asana by name found nothing. Task rows now link to `/tasks/{portalId}/view/all/task/{id}` ("Open in HubSpot ↗"). The Asana header button (90-Day marketing *plan*) is unrelated and stays. |
 | 2026-06-14 | Filter out HubSpot "(Sample task)" demo data | New portals ship sample tasks/contacts; "(Sample task) Follow up with Brian" etc. were polluting the overdue queue. `_active_tasks()` drops any subject starting with "(Sample task)". |
+| 2026-06-14 | Prune deleted deals/tasks from cache on refresh | Refresh only upserted — deals/tasks deleted in HubSpot lingered forever as stale "overdue" items with dead links (e.g. a "full deck" task later replaced by "comprehensive deck"). Added `delete_deals_not_in` / `delete_tasks_not_in` with the same ≥50%-of-existing safety guard contacts use. **Requires a re-refresh to clear existing stale rows.** |
+| 2026-06-14 | Hot-account action relabeled (was "Call X") | "Call Zocks" read like a task but is an account-to-contact prompt (3+ contacts engaged) linking to the company. Now "Hot account: X — reach out" with a "View company ↗" link. All action rows now state their link target (View company/deal/contact, Open in HubSpot). |
 
 ## Open items / next session ideas
 
