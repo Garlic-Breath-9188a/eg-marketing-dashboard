@@ -13,6 +13,11 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "cache.sqlite"
 
+# Beyond this, the cache is stale enough to mislead and the UI says so loudly.
+# Deals move and tasks get deleted daily; a day-old cache is tolerable, a
+# week-old one is not.
+STALE_AFTER_HOURS = 24
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY,
@@ -276,6 +281,39 @@ def _migrate() -> None:
         for col, col_type in new_deal_cols.items():
             if col not in existing_deal_cols:
                 conn.execute(f"ALTER TABLE deals ADD COLUMN {col} {col_type}")
+
+
+def age_hours(meta_key: str) -> float | None:
+    """Hours since the timestamp stored under `meta_key`. None if never set.
+
+    Exists because a stale cache is otherwise invisible: the sidebar showed a
+    raw ISO timestamp, so a 39-day-old cache looked the same as a fresh one at a
+    glance. That is how deleted HubSpot tasks stayed on the dashboard for weeks
+    with dead links, and how the open-pipeline figure drifted $2.3M low.
+    """
+    raw = get_meta(meta_key)
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - stamp).total_seconds() / 3600
+
+
+def describe_age(hours: float | None) -> str:
+    """Human-readable cache age: "just now", "3 hours ago", "39 days ago"."""
+    if hours is None:
+        return "never"
+    if hours < 1:
+        return "just now"
+    if hours < 24:
+        n = int(hours)
+        return f"{n} hour{'s' if n != 1 else ''} ago"
+    n = int(hours / 24)
+    return f"{n} day{'s' if n != 1 else ''} ago"
 
 
 def now_iso() -> str:

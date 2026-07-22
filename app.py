@@ -236,11 +236,13 @@ def refresh_from_wordpress():
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### Data")
-    last_refresh = db.get_meta("last_full_refresh")
-    if last_refresh:
-        st.caption(f"Last refresh: {last_refresh}")
-    else:
+    hs_age = db.age_hours("last_full_refresh")
+    if hs_age is None:
         st.caption("No data yet — run an initial refresh.")
+    elif hs_age > db.STALE_AFTER_HOURS:
+        st.error(f"HubSpot data is **{db.describe_age(hs_age)}** — refresh below.")
+    else:
+        st.caption(f"HubSpot: {db.describe_age(hs_age)}")
     if st.button("🔄 Refresh from HubSpot"):
         refresh_from_hubspot()
     last_linkedin = db.get_meta("last_linkedin_refresh")
@@ -355,6 +357,16 @@ companies = load_companies()
 if contacts.empty:
     st.warning("No data in the cache yet. Click **Refresh from HubSpot** in the sidebar.")
     st.stop()
+# A stale cache silently misreports everything on this page — deleted tasks keep
+# their rows, closed deals stay open, new pipeline is missing. Say so up front.
+_hs_age = db.age_hours("last_full_refresh")
+if _hs_age is not None and _hs_age > db.STALE_AFTER_HOURS:
+    st.error(
+        f"⚠️ **HubSpot data is {db.describe_age(_hs_age)}.** Deals, tasks and "
+        "leads below may be wrong — deleted tasks still appear and new pipeline "
+        "is missing. Use **🔄 Refresh from HubSpot** in the sidebar.",
+    )
+
 
 classified = classify_dataframe(contacts, companies)
 submissions_df = load_form_submissions()

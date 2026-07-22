@@ -201,6 +201,23 @@ if data.empty:
     st.warning("No tasks cached yet — refresh from the Overview page first.")
     st.stop()
 
+# Every count below is only as current as the cache behind it. A stale cache
+# keeps deleted HubSpot tasks on the page with links that 404.
+_ages = {
+    "HubSpot": db.age_hours("last_full_refresh"),
+    "Asana": db.age_hours("last_asana_refresh"),
+    "Slack": db.age_hours("last_slack_refresh"),
+    "Outlook": db.age_hours("last_outlook_refresh"),
+}
+_stale = {k: v for k, v in _ages.items() if v is None or v > db.STALE_AFTER_HOURS}
+if _stale:
+    st.warning(
+        "Stale sources: "
+        + ", ".join(f"**{k}** ({db.describe_age(v)})" for k, v in _stale.items())
+        + ". Refresh from the Overview page.",
+        icon="⚠️",
+    )
+
 n_stale = int((data["Tier"] == STALE_TIER).sum())
 n_undated = int((data["Tier"] == "none").sum())
 n_live_overdue = int((data["Overdue"] & (data["Tier"] != STALE_TIER)).sum())
