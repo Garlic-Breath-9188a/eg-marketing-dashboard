@@ -26,6 +26,8 @@ EXCLUDED_COMPANY_DOMAINS = {
     "grimmandco.org",     # Fractional CMO firm
     "streetcredpr.com",   # PR firm
     "mochadesigns.co",    # External development partner
+    "doverfr.com",        # Jean Sullivan — collaborator, sits in on client calls
+    "pulse360.com",       # Anand — collaborator, sits in on client calls
 }
 
 # Names never worth resolving a task to. Domain-based exclusion alone is not

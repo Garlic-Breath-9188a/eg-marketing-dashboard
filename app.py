@@ -721,11 +721,19 @@ multi_touch_df = _build_multi_touch_warm()
 # ---------------------------------------------------------------------------
 QUALIFIED_CATS = ["RIA", "Broker-Dealer", "Fintech"]  # RIA · BD · WealthTech vendors
 
-n_qualified = int(in_period["lead_category"].isin(QUALIFIED_CATS).sum())
-p_qualified = int(in_prior_period["lead_category"].isin(QUALIFIED_CATS).sum())
-n_ria = int((in_period["lead_category"] == "RIA").sum())
-n_bd = int((in_period["lead_category"] == "Broker-Dealer").sum())
-n_wt = int((in_period["lead_category"] == "Fintech").sum())
+# Drop Ezra Group's own people, its CMO/PR/dev partners, and collaborators before
+# counting. The Qualified Leads *table* below already did this, but the headline
+# KPI did not — so the number and the list under it disagreed, and the caption
+# ("Showing 25 most recent of N") described the filtered table with the
+# unfiltered count. Filter once, here, and derive both from it.
+in_period_ex = in_period[~in_period["email"].apply(_is_excluded)]
+in_prior_period_ex = in_prior_period[~in_prior_period["email"].apply(_is_excluded)]
+
+n_qualified = int(in_period_ex["lead_category"].isin(QUALIFIED_CATS).sum())
+p_qualified = int(in_prior_period_ex["lead_category"].isin(QUALIFIED_CATS).sum())
+n_ria = int((in_period_ex["lead_category"] == "RIA").sum())
+n_bd = int((in_period_ex["lead_category"] == "Broker-Dealer").sum())
+n_wt = int((in_period_ex["lead_category"] == "Fintech").sum())
 
 open_pipeline_value = float(open_deals["amount"].fillna(0).sum()) if not open_deals.empty else 0.0
 n_open_deals = len(open_deals)
@@ -915,8 +923,7 @@ else:
 # 4) 🎯 Qualified Leads
 # ===========================================================================
 st.markdown("#### 🎯 Qualified Leads — new RIA · Broker-Dealer · WealthTech in period")
-ql = in_period[in_period["lead_category"].isin(QUALIFIED_CATS)].copy()
-ql = ql[~ql["email"].apply(_is_excluded)]
+ql = in_period_ex[in_period_ex["lead_category"].isin(QUALIFIED_CATS)].copy()
 if ql.empty:
     st.info("No qualified leads (RIA / Broker-Dealer / WealthTech) created in the selected period.")
 else:
