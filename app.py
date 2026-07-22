@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 
+from classify import companies as _companies
 from classify.leads import LEAD_CATEGORIES, classify_dataframe
 from ingest import authoredup, hubspot, wordpress
 from store import db
@@ -393,12 +394,9 @@ def _fmt_delta(current: float, prior: float) -> str | None:
 ICP_FIRM_TYPES_FOR_OUTREACH = {
     "ria", "brokerdealer", "banktrust", "custodian", "asset_manager", "fintech",
 }
-EXCLUDED_DOMAINS = {
-    "ezragroup.com",      # Own company
-    "grimmandco.org",     # Fractional CMO firm
-    "streetcredpr.com",   # PR firm
-    "mochadesigns.co",    # External development partner
-}
+# Defined in classify/companies.py so the ingest layer and the dashboard cannot
+# drift apart on who counts as a non-prospect.
+EXCLUDED_DOMAINS = _companies.EXCLUDED_COMPANY_DOMAINS
 EXCLUDED_EMAILS = {
     "grimm.marcus@gmail.com",  # Fractional CMO (personal email)
 }

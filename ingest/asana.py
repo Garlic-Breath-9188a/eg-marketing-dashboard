@@ -15,7 +15,7 @@ from typing import Iterator
 
 import requests
 
-from classify import companies as companies_cls
+from ingest._shared import company_matcher
 from store import db
 
 BASE = "https://app.asana.com/api/1.0"
@@ -97,18 +97,6 @@ class AsanaClient:
         )
 
 
-def _company_matcher() -> companies_cls.CompanyMatcher:
-    """Build a matcher from the company names already in the HubSpot cache.
-
-    Needs no extra API call — companies are ingested by `ingest.hubspot`.
-    """
-    with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT name FROM companies WHERE name IS NOT NULL AND name != ''"
-        ).fetchall()
-    return companies_cls.CompanyMatcher([r["name"] for r in rows])
-
-
 def refresh(token: str, progress=None) -> dict:
     """Pull assigned Asana tasks into the cache. Returns counts."""
     client = AsanaClient(token)
@@ -128,7 +116,7 @@ def refresh(token: str, progress=None) -> dict:
         return {"asana_tasks": 0, "skipped": "no workspace"}
 
     workspace_gid = workspaces[0].get("gid")
-    matcher = _company_matcher()
+    matcher = company_matcher()
 
     if progress:
         progress("Asana: fetching assigned tasks…")

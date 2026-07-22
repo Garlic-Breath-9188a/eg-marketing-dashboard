@@ -18,6 +18,27 @@ from __future__ import annotations
 
 import re
 
+# Companies that are us, or work for us — never a prospect, never a useful tag.
+# Single source of truth: `app.py` imports this as EXCLUDED_DOMAINS.
+EXCLUDED_COMPANY_DOMAINS = {
+    "ezragroup.com",      # Own company
+    "ezragroupllc.com",   # Own company (second domain, also used for email)
+    "grimmandco.org",     # Fractional CMO firm
+    "streetcredpr.com",   # PR firm
+    "mochadesigns.co",    # External development partner
+}
+
+# Names never worth resolving a task to. Domain-based exclusion alone is not
+# enough — roughly a fifth of cached HubSpot companies have no domain at all, so
+# a self-named or junk record with a NULL domain would otherwise pass through.
+# Compared case-insensitively against the full name.
+UNMATCHABLE_COMPANY_NAMES = {
+    "ezra group",
+    "ezra group llc",
+    "test",
+    "unknown company",
+}
+
 # Shorthand → canonical HubSpot company name.
 COMPANY_ALIASES: dict[str, str] = {
     "wfa": "Wells Fargo",

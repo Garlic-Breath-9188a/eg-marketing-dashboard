@@ -166,6 +166,26 @@ CREATE TABLE IF NOT EXISTS asana_tasks (
 CREATE INDEX IF NOT EXISTS idx_asana_due ON asana_tasks(due_on);
 CREATE INDEX IF NOT EXISTS idx_asana_company ON asana_tasks(company);
 
+-- Slack messages addressed to Craig that survived the actionability filter
+-- (see classify/actionable.py). Read-only: the dashboard never posts to Slack.
+-- `id` is "<channel_id>:<thread_ts>", matching the Roland server's sourceId so
+-- completion state stays comparable across the migration.
+CREATE TABLE IF NOT EXISTS slack_items (
+    id TEXT PRIMARY KEY,
+    headline TEXT,
+    raw_text TEXT,
+    channel_id TEXT,
+    channel_name TEXT,
+    thread_ts TEXT,
+    author TEXT,
+    permalink TEXT,
+    company TEXT,
+    posted_at TEXT,
+    fetched_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_slack_posted ON slack_items(posted_at);
+
 CREATE TABLE IF NOT EXISTS wordpress_posts (
     id TEXT PRIMARY KEY,
     title TEXT,
@@ -491,6 +511,36 @@ def upsert_asana_tasks(rows: list[dict]) -> None:
     )
     with connect() as conn:
         conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def upsert_slack_items(rows: list[dict]) -> None:
+    if not rows:
+        return
+    cols = [
+        "id", "headline", "raw_text", "channel_id", "channel_name", "thread_ts",
+        "author", "permalink", "company", "posted_at", "fetched_at",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+    sql = (
+        f"INSERT INTO slack_items ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def prune_slack_items_before(cutoff_iso: str) -> int:
+    """Drop Slack items older than the cutoff.
+
+    Slack items age out by time rather than by absence: the search only ever
+    returns a recent window, so "not in this fetch" does not mean "deleted" the
+    way it does for Asana or HubSpot. Pruning by absence would delete everything
+    that scrolled out of the window.
+    """
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM slack_items WHERE posted_at < ?", (cutoff_iso,))
+        return cur.rowcount
 
 
 def upsert_wordpress_posts(rows: list[dict]) -> None:

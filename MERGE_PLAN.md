@@ -112,7 +112,9 @@ doesn't have yet.
 New modules under `ingest/`, mirroring the existing `hubspot.py` shape
 (`refresh()` → upsert into SQLite):
 
-- [ ] `ingest/asana.py` — port `fetchAsanaTasks()` (server.js:259)
+- [x] `ingest/asana.py` — done 2026-07-22, commit `56ab96e`. **185 tasks**
+      (the Node version silently capped at 100 — 28 overdue tasks were hidden).
+      Also fixed company mis-tagging; see `classify/companies.py`.
 - [ ] `ingest/slack.py` — port `fetchSlackItems()` (server.js:589).
       Read-only: `search.messages` for mentions. **Do not port
       `chat.postMessage`.**
