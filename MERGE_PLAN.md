@@ -102,10 +102,13 @@ doesn't have yet.
       (`/api/status` 200, 276 tasks).
 - [x] Zapier Zap 273528709 — Outlook draft step deleted, published as **v40**.
       Both draft generators are now off; zero drafts per prospect call.
-- [ ] Re-authenticate MS Graph — the refresh token expired 2026-07-01
-      (`AADSTS700082`). Follow-up detection cannot work until this is done.
-- [ ] Copy `.env` values into `.streamlit/secrets.toml` keys (Asana, Slack,
-      MS Graph). Do not commit.
+- [x] MS Graph re-authenticated 2026-07-22. Token in `.streamlit/secrets.toml`.
+      ⚠️ Azure **client secret expires 2026-09-27** — Outlook dies again then.
+      ⚠️ Granted scope still includes `Mail.ReadWrite`; Azure returns every
+      consented scope regardless of the request. Removing it needs an Azure
+      app-registration change. Nothing in this repo writes mail.
+- [x] Asana, Slack and MS Graph credentials copied into
+      `.streamlit/secrets.toml` (gitignored).
 
 ### Phase 1 — Port the task sources to Python
 
@@ -122,8 +125,10 @@ New modules under `ingest/`, mirroring the existing `hubspot.py` shape
       was missing from `EXCLUDED_DOMAINS`** — Ezra Group's own people counted
       as qualified leads in the CRO KPIs. Lead counts will drop slightly and
       correctly on next refresh.
-- [ ] `ingest/outlook.py` — port `refreshMsToken()` + `fetchOutlookEmails()`
-      (server.js:691, 733)
+- [x] `ingest/outlook.py` — done 2026-07-22, commit `0325e45`. Flagged /
+      high-importance mail only (12 of 187 cached). The Node version treated all
+      recent inbox mail as tasks; its top senders were asana.com, Cision and
+      LinkedIn. Also provides `iter_sent_to()` for the follow-up tracker.
 - [ ] `store/db.py` — add `unified_tasks` table spanning all sources
       (id, source, source_id, name, project/company, due_date, priority, url,
       amount, completed) + upserts and prune-not-in guards matching the
