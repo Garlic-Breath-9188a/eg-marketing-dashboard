@@ -57,34 +57,46 @@ else:
 
 st.divider()
 
-# Top posts by views (or by recency if no stats)
+# Posts, ranked by views. Views come from Jetpack Stats, which needs a
+# WordPress.com token — without it every post reads 0 and sorting by views
+# would produce an arbitrary order, so fall back to newest-first and say so
+# rather than presenting a meaningless ranking as a ranking.
 if has_stats:
-    st.subheader("Top posts by views (last 30 days)")
-    sort_col = "views_30d"
+    st.subheader("Posts by views (last 30 days)")
+    posts_sorted = posts.sort_values("views_30d", ascending=False, na_position="last")
 else:
-    st.subheader("Most recent posts")
-    sort_col = "published_at"
+    st.subheader("Posts — newest first")
+    st.info(
+        "**View counts are unavailable**, so these are sorted by date instead. "
+        "Views need Jetpack Stats: create a token at "
+        "[developer.wordpress.com/apps](https://developer.wordpress.com/apps), then add "
+        "`WPCOM_API_TOKEN` and `WPCOM_SITE = \"wealthtechtoday.com\"` to "
+        "`.streamlit/secrets.toml` and refresh WordPress. The ingest already "
+        "fetches views when the token is present — nothing else to build.",
+        icon="📊",
+    )
+    posts_sorted = posts.sort_values("published_at", ascending=False, na_position="last")
 
-display = posts.sort_values(sort_col, ascending=False).head(20).copy()
+display = posts_sorted.head(20).copy()
 display["Title"] = display["title"]
+display["Views"] = display["views_30d"].fillna(0).astype(int)
 display["Categories"] = display["categories"]
-display["Published"] = display["published_at"]
-display["Author"] = display["author_name"]
+# Date only — the stored value is a full UTC timestamp, and the time of day
+# carries no meaning for a published post.
+display["Published"] = display["published_at"].dt.strftime("%Y-%m-%d")
 display["URL"] = display["url"]
-cols_to_show = ["Title", "Categories", "Author", "Published", "URL"]
-if has_stats:
-    display["Views 30d"] = display["views_30d"].fillna(0).astype(int)
-    display["Views all time"] = display["views_all_time"].fillna(0).astype(int)
-    cols_to_show = ["Title", "Views 30d", "Views all time", "Categories", "Published", "URL"]
 
 st.dataframe(
-    display[cols_to_show],
-    use_container_width=True, hide_index=True, height=540,
+    display[["Title", "Views", "Categories", "Published", "URL"]],
+    width="stretch", hide_index=True, height=540,
     column_config={
         "Title": st.column_config.TextColumn(width="large"),
+        "Views": st.column_config.NumberColumn(
+            "Views (30d)", format="%d", width="small",
+            help=None if has_stats else "Jetpack Stats not connected — all zero.",
+        ),
         "Categories": st.column_config.TextColumn(width="medium"),
-        "Views 30d": st.column_config.NumberColumn(format="%d"),
-        "Views all time": st.column_config.NumberColumn(format="%d"),
+        "Published": st.column_config.TextColumn(width="small"),
         "URL": st.column_config.LinkColumn("Open", display_text="↗", width="small"),
     },
 )
@@ -98,4 +110,4 @@ monthly = posts_with_date.groupby("month").size().reset_index(name="posts")
 fig = px.bar(monthly.tail(24), x="month", y="posts")
 fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10),
                   xaxis_title=None, yaxis_title="Posts published")
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
