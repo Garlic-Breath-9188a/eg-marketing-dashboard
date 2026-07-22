@@ -6,3 +6,4 @@ requests>=2.31,<3
 pandas>=3.0,<4
 plotly>=6.0,<7
 python-dateutil>=2.9,<3
+anthropic>=0.60,<1

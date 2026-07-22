@@ -212,6 +212,34 @@ CREATE TABLE IF NOT EXISTS outlook_messages (
 
 CREATE INDEX IF NOT EXISTS idx_outlook_received ON outlook_messages(received_at);
 
+-- Fathom calls classified as prospect conversations, and whether a follow-up
+-- email went out afterwards. Replaces the Outlook draft generation that was
+-- removed from both the Roland agent and Zapier Zap 273528709 on 2026-07-22:
+-- the drafts went unused, so the dashboard tracks the follow-up instead.
+--
+-- `attendees_json` holds external attendees only (internal domains stripped at
+-- ingest) — that list is what the Sent Items scan matches against.
+CREATE TABLE IF NOT EXISTS prospect_calls (
+    recording_id TEXT PRIMARY KEY,
+    call_title TEXT,
+    call_at TEXT,
+    company TEXT,
+    attendees_json TEXT,
+    fathom_url TEXT,
+    is_prospect INTEGER,
+    classification_reason TEXT,
+    classified_at TEXT,
+    followed_up_at TEXT,
+    follow_up_subject TEXT,
+    follow_up_to TEXT,
+    follow_up_url TEXT,
+    dismissed_at TEXT,
+    fetched_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_prospect_calls_at ON prospect_calls(call_at);
+CREATE INDEX IF NOT EXISTS idx_prospect_calls_followed ON prospect_calls(followed_up_at);
+
 CREATE TABLE IF NOT EXISTS wordpress_posts (
     id TEXT PRIMARY KEY,
     title TEXT,
@@ -628,6 +656,74 @@ def prune_outlook_messages_before(cutoff_iso: str) -> int:
             "DELETE FROM outlook_messages WHERE received_at < ?", (cutoff_iso,)
         )
         return cur.rowcount
+
+
+PROSPECT_CALL_COLS = [
+    "recording_id", "call_title", "call_at", "company", "attendees_json",
+    "fathom_url", "is_prospect", "classification_reason", "classified_at",
+    "followed_up_at", "follow_up_subject", "follow_up_to", "follow_up_url",
+    "dismissed_at", "fetched_at",
+]
+
+# Set once at classification and never revisited — re-running the ingest must
+# not wipe a follow-up already detected, or a row the user dismissed.
+_PROSPECT_PRESERVED = {"followed_up_at", "follow_up_subject", "follow_up_to",
+                       "follow_up_url", "dismissed_at"}
+
+
+def upsert_prospect_calls(rows: list[dict]) -> None:
+    """Insert or update calls, preserving follow-up and dismissal state.
+
+    Classification is expensive (one Claude call per transcript), so the ingest
+    skips already-classified calls entirely — but if a row is re-upserted for
+    any reason, COALESCE keeps existing follow-up data rather than nulling it.
+    """
+    if not rows:
+        return
+    placeholders = ", ".join("?" for _ in PROSPECT_CALL_COLS)
+    updates = ", ".join(
+        f"{c}=COALESCE({c}, excluded.{c})" if c in _PROSPECT_PRESERVED
+        else f"{c}=excluded.{c}"
+        for c in PROSPECT_CALL_COLS if c != "recording_id"
+    )
+    sql = (
+        f"INSERT INTO prospect_calls ({', '.join(PROSPECT_CALL_COLS)}) "
+        f"VALUES ({placeholders}) "
+        f"ON CONFLICT(recording_id) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(
+            sql, [tuple(r.get(c) for c in PROSPECT_CALL_COLS) for r in rows]
+        )
+
+
+def classified_recording_ids() -> set[str]:
+    """Recording IDs already classified — skipped on the next ingest."""
+    with connect() as conn:
+        return {
+            r["recording_id"]
+            for r in conn.execute(
+                "SELECT recording_id FROM prospect_calls WHERE classified_at IS NOT NULL"
+            )
+        }
+
+
+def mark_followed_up(recording_id: str, sent_at: str, subject: str,
+                     to_address: str, url: str | None) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE prospect_calls SET followed_up_at=?, follow_up_subject=?, "
+            "follow_up_to=?, follow_up_url=? WHERE recording_id=?",
+            (sent_at, subject, to_address, url, recording_id),
+        )
+
+
+def dismiss_prospect_call(recording_id: str, when_iso: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE prospect_calls SET dismissed_at=? WHERE recording_id=?",
+            (when_iso, recording_id),
+        )
 
 
 def upsert_wordpress_posts(rows: list[dict]) -> None:
