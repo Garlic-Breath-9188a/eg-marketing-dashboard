@@ -115,9 +115,13 @@ New modules under `ingest/`, mirroring the existing `hubspot.py` shape
 - [x] `ingest/asana.py` — done 2026-07-22, commit `56ab96e`. **185 tasks**
       (the Node version silently capped at 100 — 28 overdue tasks were hidden).
       Also fixed company mis-tagging; see `classify/companies.py`.
-- [ ] `ingest/slack.py` — port `fetchSlackItems()` (server.js:589).
-      Read-only: `search.messages` for mentions. **Do not port
-      `chat.postMessage`.**
+- [x] `ingest/slack.py` — done 2026-07-22, commit `b1e25c5`. Read-only;
+      `chat.postMessage` deliberately not ported. 437 scanned → 96 kept.
+      Actionability filter lives in `classify/actionable.py`.
+      ⚠️ Fixing the shared exclusion list revealed that **`ezragroupllc.com`
+      was missing from `EXCLUDED_DOMAINS`** — Ezra Group's own people counted
+      as qualified leads in the CRO KPIs. Lead counts will drop slightly and
+      correctly on next refresh.
 - [ ] `ingest/outlook.py` — port `refreshMsToken()` + `fetchOutlookEmails()`
       (server.js:691, 733)
 - [ ] `store/db.py` — add `unified_tasks` table spanning all sources

@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from classify import companies as _companies
+from classify import pipeline
 from classify.leads import LEAD_CATEGORIES, classify_dataframe
 from ingest import authoredup, hubspot, wordpress
 from store import db
@@ -566,43 +567,18 @@ def _build_multi_touch_warm() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Deals + tasks: open pipeline, hot-deal scoring, task urgency
 # ---------------------------------------------------------------------------
-CLOSED_STAGES = {"closedwon", "closedlost"}  # legacy default-pipeline literals
-# Known Closed Won/Lost stage IDs across this portal's 3 pipelines (WTIS,
-# Vendor/Research, Wealth Management). Fallback so caches refreshed before the
-# per-deal hs_is_closed flag was ingested still filter closed deals correctly.
-CLOSED_STAGE_IDS = {
-    "1317293194", "1317293195",
-    "1317544073", "1317544074",
-    "1317694355", "1317694356",
-}
+# Closed-deal detection and sample-task filtering live in classify/pipeline.py
+# so the Tasks page applies exactly the same rules.
+CLOSED_STAGES = pipeline.CLOSED_STAGES
+CLOSED_STAGE_IDS = pipeline.CLOSED_STAGE_IDS
 
 
 def _open_deals() -> pd.DataFrame:
-    """Open = not closed. The authoritative signal is the per-deal hs_is_closed flag
-    (stored as stage_is_closed). We also OR in every fallback we have — "closed" stage
-    label, known closed stage IDs, legacy literals — so caches predating the flag still
-    exclude closed deals correctly.
-    """
-    if deals_df.empty:
-        return pd.DataFrame()
-    df = deals_df
-    closed = df["stage_is_closed"].fillna(0).astype(int) == 1
-    if "stage_label" in df.columns:
-        closed = closed | df["stage_label"].fillna("").str.contains("closed", case=False, na=False)
-    if "dealstage" in df.columns:
-        ds = df["dealstage"].fillna("").astype(str)
-        closed = closed | ds.str.lower().isin(CLOSED_STAGES) | ds.isin(CLOSED_STAGE_IDS)
-    return df[~closed].copy()
+    return pipeline.open_deals(deals_df)
 
 
 def _active_tasks(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or "status" not in df.columns or "due_at" not in df.columns:
-        return pd.DataFrame()
-    out = df[~df["status"].fillna("").str.upper().isin({"COMPLETED", "DEFERRED"})].copy()
-    # Drop HubSpot's built-in demo data ("(Sample task) …") — not real work.
-    if "subject" in out.columns:
-        out = out[~out["subject"].fillna("").str.startswith("(Sample task)")]
-    return out
+    return pipeline.active_tasks(df)
 
 
 def _deal_ids_with_urgent_tasks(active: pd.DataFrame, horizon_days: int = 14) -> set[str]:
