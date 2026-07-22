@@ -176,9 +176,24 @@ New modules under `ingest/`, mirroring the existing `hubspot.py` shape
 
 ### Phase 5 — Decommission
 
-- [ ] Unload + remove `com.ezragroup.paperclip` (this is what stops the Slack
-      briefing). Confirm nothing else depends on Paperclip first.
+- [x] **Slack briefing stopped 2026-07-22 — without stopping Paperclip.**
+      Paperclip turned out to be an autonomous agent org, not a briefing script:
+      46 days uptime, embedded Postgres, nightly backups, an issue tracker, and
+      a CEO agent whose `HEARTBEAT.md` has 13 sections. The briefing was only
+      section 0; **section 5 is the health check on the Fathom Meeting
+      Intelligence agent** (triggers polls when it goes quiet, reprocesses
+      failed transcripts). Unloading the service would have silently removed
+      that watchdog.
+      Instead section 0 was replaced with an explicit "do not self-schedule a
+      briefing, do not post to Slack" instruction. Original preserved at
+      `HEARTBEAT.md.bak-20260722` in the agent's instructions directory.
+- [x] `pages/0_Daily_Briefing.py` — commit `1e108c2`. Outbound touch count and
+      campaign-status narrative are **not** reproduced; both needed a model pass
+      over Sent Items. Stated on the page rather than dropped silently.
 - [ ] Retire the Express server: `/dashboard`, `/cos`, `/editor`, `/api/*`.
+      ⚠️ **Blocked on Phase 4.** `server.js` still hosts the Fathom →
+      Asana/HubSpot task creation, and Paperclip's CEO agent polls
+      `localhost:3001/api/fathom/*` to keep it healthy. Extract the agent first.
 - [ ] Zapier Zap 273528709 Step 16 (Slack `#sales` post) — Craig's call whether
       that one goes too; transcript filing to SharePoint should stay either way.
 - [ ] Archive `Sales Task Dashboard/` once the Fathom agent is extracted.
