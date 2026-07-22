@@ -138,8 +138,12 @@ New modules under `ingest/`, mirroring the existing `hubspot.py` shape
 
 ### Phase 3 — New pages
 
-- [ ] `pages/6_Tasks.py` — the unified task list: all sources, priority-sorted,
-      filterable by source/company/tier. Replaces `localhost:3001/dashboard`.
+- [x] `pages/6_Tasks.py` — done 2026-07-22, commit `526e0ce`. 574 items.
+      **Sectioned, not one ranked list** — 68% of items have no due date, so the
+      priority curve ties them all and a single sorted list is unusable. Sections:
+      Needs attention (20) · Unscheduled (391) · Stale 30+ days (163, collapsed).
+      ⚠️ The stale pile is 28% of everything — likely done-but-not-closed work
+      inflating every overdue count. Worth a triage pass at the source.
 - [ ] Rework `app.py` home into the **Daily Briefing** page — the sections from
       the Slack DM: outbound touches, overdue, due today, campaign status,
       HubSpot campaign stats, weighted pipeline, top priority today. Fold the

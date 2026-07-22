@@ -186,6 +186,27 @@ CREATE TABLE IF NOT EXISTS slack_items (
 
 CREATE INDEX IF NOT EXISTS idx_slack_posted ON slack_items(posted_at);
 
+-- Recent Outlook mail that plausibly needs a reply. Read-only via MS Graph.
+-- Scoped to the inbox; Sent Items is queried separately (and not cached) by the
+-- follow-up tracker, which only needs to ask "did I reply to this person".
+CREATE TABLE IF NOT EXISTS outlook_messages (
+    id TEXT PRIMARY KEY,
+    subject TEXT,
+    from_name TEXT,
+    from_email TEXT,
+    received_at TEXT,
+    is_unread INTEGER,
+    is_flagged INTEGER,
+    is_high_importance INTEGER,
+    has_attachments INTEGER,
+    body_preview TEXT,
+    web_link TEXT,
+    company TEXT,
+    fetched_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_outlook_received ON outlook_messages(received_at);
+
 CREATE TABLE IF NOT EXISTS wordpress_posts (
     id TEXT PRIMARY KEY,
     title TEXT,
@@ -540,6 +561,34 @@ def prune_slack_items_before(cutoff_iso: str) -> int:
     """
     with connect() as conn:
         cur = conn.execute("DELETE FROM slack_items WHERE posted_at < ?", (cutoff_iso,))
+        return cur.rowcount
+
+
+def upsert_outlook_messages(rows: list[dict]) -> None:
+    if not rows:
+        return
+    cols = [
+        "id", "subject", "from_name", "from_email", "received_at", "is_unread",
+        "is_flagged", "is_high_importance", "has_attachments", "body_preview",
+        "web_link", "company", "fetched_at",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+    sql = (
+        f"INSERT INTO outlook_messages ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def prune_outlook_messages_before(cutoff_iso: str) -> int:
+    """Age out old mail. Like Slack, absence from a fetch means "scrolled out of
+    the window", not "deleted", so pruning by absence would empty the table."""
+    with connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM outlook_messages WHERE received_at < ?", (cutoff_iso,)
+        )
         return cur.rowcount
 
 

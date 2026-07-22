@@ -6,7 +6,15 @@ Replaces the Roland dashboard at localhost:3001. Sources:
   • HubSpot      — active tasks
   • HubSpot      — open deals (ranked by close date)
   • Slack        — messages addressed to Craig that look like asks
-  • Outlook      — pending; blocked on the expired MS Graph refresh token
+  • Outlook      — flagged or high-importance mail only
+
+Outlook is filtered hard on purpose. The Roland server treated all recent inbox
+mail as tasks, which meant its top "task" senders were asana.com, Cision,
+LinkedIn and Substack — 187 items of which ~12 were real. Flag state is the only
+reliable signal here, because it is the one Craig sets by hand. "Unread from a
+known HubSpot contact" was measured and rejected: 3,783 contact domains include
+every PR firm and newsletter sender ever imported, so it added 30 rows of pure
+noise.
 
 Everything is scored by `classify.priority` so items from different systems sort
 against each other honestly. Lower score = needs attention sooner.
@@ -28,6 +36,7 @@ import pandas as pd
 import streamlit as st
 
 from classify import pipeline, priority
+from ingest import outlook
 from store import db
 
 st.set_page_config(page_title="Tasks — EG Marketing Dashboard", page_icon="✅", layout="wide")
@@ -38,13 +47,6 @@ if not st.session_state.get("authed"):
 
 HUBSPOT_PORTAL_ID = st.secrets.get("HUBSPOT_PORTAL_ID", "50726076")
 HUBSPOT_BASE = "https://app.hubspot.com"
-
-# Sources the Roland server covered. Outlook is listed so its absence is visible
-# on the page rather than looking like "no email tasks today".
-PENDING_SOURCES = {
-    "Outlook": "MS Graph refresh token expired — re-auth to enable",
-}
-
 
 @st.cache_data(ttl=3600)
 def _table(name: str) -> pd.DataFrame:
@@ -133,12 +135,39 @@ def _rows_from_slack(df: pd.DataFrame) -> list[dict]:
     ]
 
 
+def _rows_from_outlook(df: pd.DataFrame) -> list[dict]:
+    """Flagged / high-importance mail only — see the module docstring."""
+    if df.empty:
+        return []
+    marked = df[(df["is_flagged"] == 1) | (df["is_high_importance"] == 1)]
+    if marked.empty:
+        return []
+    received = pd.to_datetime(marked["received_at"], errors="coerce", utc=True)
+    rows = []
+    for (_, r), ts in zip(marked.iterrows(), received):
+        # A flagged mail's received date stands in for a due date — it is the
+        # day Craig decided it needed action. High-importance-only mail has no
+        # such signal and stays undated.
+        due = ts.date() if (r["is_flagged"] and pd.notna(ts)) else None
+        rows.append({
+            "Source": "Outlook",
+            "Task": r["subject"],
+            "Company": r["company"],
+            "Context": f"From {r['from_name']}" + (" · 📎" if r["has_attachments"] else ""),
+            "_priority": priority.compute(due, outlook.priority_of(r)),
+            "_recency": ts,
+            "Link": r["web_link"],
+        })
+    return rows
+
+
 def load_unified() -> pd.DataFrame:
     rows: list[dict] = []
     rows += _rows_from_asana(_table("asana_tasks"))
     rows += _rows_from_hubspot_tasks(_table("tasks"))
     rows += _rows_from_deals(_table("deals"))
     rows += _rows_from_slack(_table("slack_items"))
+    rows += _rows_from_outlook(_table("outlook_messages"))
     if not rows:
         return pd.DataFrame()
 
@@ -163,8 +192,8 @@ STALE_TIER = "very-stale"
 
 st.title("✅ Tasks")
 st.caption(
-    "Every open item across Asana, HubSpot tasks and deals, and Slack — ranked "
-    "on one scale. Sorted by how soon each needs attention, not by source."
+    "Every open item across Asana, HubSpot tasks and deals, Slack, and flagged "
+    "Outlook mail — scored on one scale so sources compare honestly."
 )
 
 data = load_unified()
@@ -198,9 +227,6 @@ c4.metric(
     help="30+ days overdue. Almost certainly needs closing or re-dating "
          "at the source rather than doing.",
 )
-
-for source, reason in PENDING_SOURCES.items():
-    st.info(f"**{source} not included** — {reason}", icon="⚠️")
 
 st.divider()
 
