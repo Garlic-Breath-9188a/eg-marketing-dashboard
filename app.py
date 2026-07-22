@@ -9,7 +9,7 @@ import streamlit as st
 from classify import companies as _companies
 from classify import pipeline
 from classify.leads import LEAD_CATEGORIES, classify_dataframe
-from ingest import authoredup, hubspot, wordpress
+from ingest import authoredup, hubspot, refresh_all, wordpress
 from store import db
 
 st.set_page_config(
@@ -62,6 +62,18 @@ if not _check_password():
     st.stop()
 
 db.init_db()
+
+
+# Streamlit Cloud has no persistent disk: every redeploy starts with an empty
+# SQLite cache, and no cron exists there to fill it. Bootstrap on first load so
+# the deployed app is never blank. Locally this is a no-op — the launchd job
+# (scripts/com.ezragroup.eg-dashboard-refresh.plist) keeps the cache warm.
+if not db._count("contacts") and not st.session_state.get("_bootstrapped"):
+    st.session_state["_bootstrapped"] = True
+    with st.spinner("First run — loading data from all sources. This takes a minute…"):
+        _report = refresh_all.refresh_all(dict(st.secrets), only_stale=False)
+    if _report.failed:
+        st.warning(_report.summary())
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +196,36 @@ def refresh_from_hubspot():
     load_tasks.clear()
 
 
+def _clear_all_caches() -> None:
+    for loader in (load_contacts, load_companies, load_forms, load_form_submissions,
+                   load_linkedin_posts, load_deals, load_tasks):
+        loader.clear()
+
+
+def run_full_refresh(force: bool = False) -> None:
+    """Refresh every source through the shared orchestrator.
+
+    Same code path as `scripts/refresh_all.py`, which the daily launchd job
+    runs — one definition of "refresh everything", so the button and the
+    schedule cannot drift apart.
+    """
+    status = st.empty()
+    report = refresh_all.refresh_all(
+        dict(st.secrets),
+        progress=lambda m: status.text(m),
+        only_stale=not force,
+    )
+    status.empty()
+    _clear_all_caches()
+
+    if report.failed:
+        st.warning(report.summary())
+    elif report.did_anything:
+        st.success(report.summary())
+    else:
+        st.info(report.summary())
+
+
 def refresh_from_authoredup():
     api_key = st.secrets.get("AUTHOREDUP_API_KEY", "")
     if not api_key:
@@ -236,25 +278,34 @@ def refresh_from_wordpress():
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### Data")
-    hs_age = db.age_hours("last_full_refresh")
-    if hs_age is None:
-        st.caption("No data yet — run an initial refresh.")
-    elif hs_age > db.STALE_AFTER_HOURS:
-        st.error(f"HubSpot data is **{db.describe_age(hs_age)}** — refresh below.")
-    else:
-        st.caption(f"HubSpot: {db.describe_age(hs_age)}")
-    if st.button("🔄 Refresh from HubSpot"):
-        refresh_from_hubspot()
-    last_linkedin = db.get_meta("last_linkedin_refresh")
-    if last_linkedin:
-        st.caption(f"LinkedIn refresh: {last_linkedin}")
-    if st.button("💼 Refresh from AuthoredUp"):
-        refresh_from_authoredup()
-    last_wp = db.get_meta("last_wordpress_refresh")
-    if last_wp:
-        st.caption(f"WordPress refresh: {last_wp}")
-    if st.button("📰 Refresh from WordPress"):
-        refresh_from_wordpress()
+
+    # Age of every source, so a single stale one can't hide behind the others.
+    for label, key in (
+        ("HubSpot", "last_full_refresh"),
+        ("Asana", "last_asana_refresh"),
+        ("Slack", "last_slack_refresh"),
+        ("Outlook", "last_outlook_refresh"),
+        ("LinkedIn", "last_linkedin_refresh"),
+        ("WordPress", "last_wordpress_refresh"),
+    ):
+        age = db.age_hours(key)
+        if age is None:
+            st.caption(f"{label}: never")
+        elif age > db.STALE_AFTER_HOURS:
+            st.caption(f":red[{label}: {db.describe_age(age)}]")
+        else:
+            st.caption(f"{label}: {db.describe_age(age)}")
+
+    if st.button("🔄 Refresh everything", type="primary"):
+        run_full_refresh(force=True)
+
+    with st.expander("Refresh one source"):
+        if st.button("HubSpot"):
+            refresh_from_hubspot()
+        if st.button("AuthoredUp"):
+            refresh_from_authoredup()
+        if st.button("WordPress"):
+            refresh_from_wordpress()
 
     st.markdown("---")
     st.markdown("### Date range")

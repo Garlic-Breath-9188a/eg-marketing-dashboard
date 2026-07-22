@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Daily refresh of the EG Marketing Dashboard cache.
+
+  Install:
+    cp scripts/com.ezragroup.eg-dashboard-refresh.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.ezragroup.eg-dashboard-refresh.plist
+
+  Run once by hand:
+    launchctl start com.ezragroup.eg-dashboard-refresh
+
+  Logs: /tmp/eg-dashboard-refresh.log
+
+  NOTE: there is deliberately no <WorkingDirectory>. scripts/refresh_all.py
+  resolves the repo from its own __file__, so this job cannot break the way
+  com.ezragroup.roland-dashboard did in July 2026, when a renamed folder left
+  WorkingDirectory pointing at a path that no longer existed and the service
+  crash-looped silently for six days.
+
+  Both absolute paths below still assume the repo stays at the location shown.
+  If you move or rename it, update this file and reload the job.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ezragroup.eg-dashboard-refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/craigiskowitz/Library/CloudStorage/OneDrive-EzraGroupLLC/Documents - Ezra Group LLC Team Site/Development Projects/EG Marketing Dashboard/.venv/bin/python</string>
+        <string>/Users/craigiskowitz/Library/CloudStorage/OneDrive-EzraGroupLLC/Documents - Ezra Group LLC Team Site/Development Projects/EG Marketing Dashboard/scripts/refresh_all.py</string>
+        <string>--force</string>
+    </array>
+
+    <!-- 06:30 daily, so the cache is current before the working day starts. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- Catch up after the Mac has been asleep or powered off at 06:30. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/eg-dashboard-refresh.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/eg-dashboard-refresh.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
