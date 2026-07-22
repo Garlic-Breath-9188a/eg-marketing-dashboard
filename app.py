@@ -8,6 +8,7 @@ import streamlit as st
 
 from classify import companies as _companies
 from classify import pipeline
+from classify import qualified as _qualified
 from classify.leads import LEAD_CATEGORIES, classify_dataframe
 from ingest import authoredup, hubspot, refresh_all, wordpress
 from store import db
@@ -719,7 +720,8 @@ multi_touch_df = _build_multi_touch_warm()
 # ---------------------------------------------------------------------------
 # Critical KPI figures
 # ---------------------------------------------------------------------------
-QUALIFIED_CATS = ["RIA", "Broker-Dealer", "Fintech"]  # RIA · BD · WealthTech vendors
+# Qualified-lead categories now live in classify/qualified.py, split by
+# sales motion (advisory vs WealthTech vendor).
 
 # Drop Ezra Group's own people, its CMO/PR/dev partners, and collaborators before
 # counting. The Qualified Leads *table* below already did this, but the headline
@@ -729,11 +731,21 @@ QUALIFIED_CATS = ["RIA", "Broker-Dealer", "Fintech"]  # RIA · BD · WealthTech 
 in_period_ex = in_period[~in_period["email"].apply(_is_excluded)]
 in_prior_period_ex = in_prior_period[~in_prior_period["email"].apply(_is_excluded)]
 
-n_qualified = int(in_period_ex["lead_category"].isin(QUALIFIED_CATS).sum())
-p_qualified = int(in_prior_period_ex["lead_category"].isin(QUALIFIED_CATS).sum())
-n_ria = int((in_period_ex["lead_category"] == "RIA").sum())
-n_bd = int((in_period_ex["lead_category"] == "Broker-Dealer").sum())
-n_wt = int((in_period_ex["lead_category"] == "Fintech").sum())
+# A qualified lead is an ICP *firm* that has actually engaged — see
+# classify/qualified.py for why (the old test was industry alone, which counted
+# 200 contacts of whom 79 had never done anything, and mixed two sales motions).
+qual_period = _qualified.qualify(in_period_ex)
+qual_prior = _qualified.qualify(in_prior_period_ex)
+
+n_advisory = _qualified.count_accounts(qual_period, "advisory")
+p_advisory = _qualified.count_accounts(qual_prior, "advisory")
+n_vendor = _qualified.count_accounts(qual_period, "vendor")
+
+# Shown alongside so the drop from the old headline number is explained rather
+# than mysterious — these are ICP contacts with no interaction recorded yet.
+n_unengaged = int(
+    (qual_period["motion"].notna() & ~qual_period["engaged"]).sum()
+)
 
 open_pipeline_value = float(open_deals["amount"].fillna(0).sum()) if not open_deals.empty else 0.0
 n_open_deals = len(open_deals)
@@ -858,11 +870,13 @@ st.markdown("#### Critical KPIs")
 k1, k2, k3, k4 = st.columns(4)
 with k1:
     st.metric(
-        "Qualified leads", f"{n_qualified:,}",
-        delta=_fmt_delta(n_qualified, p_qualified),
-        help="Priority-segment ICP leads created this period: RIA + Broker-Dealer + WealthTech vendors (Fintech).",
+        "Advisory prospects", f"{n_advisory:,}",
+        delta=_fmt_delta(n_advisory, p_advisory),
+        help="RIA + Broker-Dealer **firms** that engaged this period — filled in a "
+             "form, opened or clicked an email, were logged as contacted, or have a "
+             "deal. Counts firms, not people.",
     )
-    st.caption(f"{n_ria} RIA · {n_bd} BD · {n_wt} WealthTech")
+    st.caption(f"🤝 {n_vendor} WealthTech vendor firms (WTIS) · {n_unengaged} not yet engaged")
 with k2:
     st.metric(
         "Open pipeline", f"${open_pipeline_value:,.0f}",
@@ -922,10 +936,15 @@ else:
 # ===========================================================================
 # 4) 🎯 Qualified Leads
 # ===========================================================================
-st.markdown("#### 🎯 Qualified Leads — new RIA · Broker-Dealer · WealthTech in period")
-ql = in_period_ex[in_period_ex["lead_category"].isin(QUALIFIED_CATS)].copy()
+st.markdown("#### 🎯 Qualified Leads — engaged ICP firms in period")
+_motion_label = st.radio(
+    "Motion", ["Advisory (RIA · Broker-Dealer)", "WealthTech vendors (WTIS)"],
+    horizontal=True, label_visibility="collapsed",
+)
+_motion = "advisory" if _motion_label.startswith("Advisory") else "vendor"
+ql = _qualified.qualified_contacts(qual_period, _motion).copy()
 if ql.empty:
-    st.info("No qualified leads (RIA / Broker-Dealer / WealthTech) created in the selected period.")
+    st.info("No engaged ICP firms in the selected period for this motion.")
 else:
     ql = ql.sort_values("createdate", ascending=False).head(25)
     ql["Created"] = ql["createdate"].dt.date
@@ -944,8 +963,15 @@ else:
             "HubSpot": st.column_config.LinkColumn("Open", display_text="Open ↗", width="small"),
         },
     )
-    if int(in_period["lead_category"].isin(QUALIFIED_CATS).sum()) > 25:
-        st.caption(f"Showing 25 most recent of {n_qualified} qualified leads. Full list on the **Leads** page.")
+    # Count against the same filtered, motion-scoped set the table shows — the
+    # old check used the unfiltered contact count and so fired inconsistently.
+    if len(_qualified.qualified_contacts(qual_period, _motion)) > 25:
+        st.caption(
+            f"Showing the 25 most recent contacts behind "
+            f"{n_advisory if _motion == 'advisory' else n_vendor} engaged "
+            f"{_motion} firm(s). A firm counts once however many contacts it has. "
+            "Full list on the **Leads** page."
+        )
 
 st.divider()
 st.caption(
