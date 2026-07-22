@@ -145,6 +145,27 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 
+-- Asana tasks assigned to Craig. Ported from the Roland Express server
+-- (fetchAsanaTasks) so the dashboard no longer depends on localhost:3001.
+-- `company` is resolved at ingest against known HubSpot company names; it stays
+-- NULL when no match is found.
+CREATE TABLE IF NOT EXISTS asana_tasks (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    due_on TEXT,
+    assignee TEXT,
+    project TEXT,
+    section TEXT,
+    parent_task TEXT,
+    notes TEXT,
+    url TEXT,
+    company TEXT,
+    fetched_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_asana_due ON asana_tasks(due_on);
+CREATE INDEX IF NOT EXISTS idx_asana_company ON asana_tasks(company);
+
 CREATE TABLE IF NOT EXISTS wordpress_posts (
     id TEXT PRIMARY KEY,
     title TEXT,
@@ -354,6 +375,14 @@ def delete_deals_not_in(ids: set[str]) -> int:
     return _delete_not_in("deals", ids)
 
 
+def count_asana_tasks() -> int:
+    return _count("asana_tasks")
+
+
+def delete_asana_tasks_not_in(ids: set[str]) -> int:
+    return _delete_not_in("asana_tasks", ids)
+
+
 def delete_tasks_not_in(ids: set[str]) -> int:
     return _delete_not_in("tasks", ids)
 
@@ -441,6 +470,23 @@ def upsert_tasks(rows: list[dict]) -> None:
     updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
     sql = (
         f"INSERT INTO tasks ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+    )
+    with connect() as conn:
+        conn.executemany(sql, [tuple(r.get(c) for c in cols) for r in rows])
+
+
+def upsert_asana_tasks(rows: list[dict]) -> None:
+    if not rows:
+        return
+    cols = [
+        "id", "name", "due_on", "assignee", "project", "section",
+        "parent_task", "notes", "url", "company", "fetched_at",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+    sql = (
+        f"INSERT INTO asana_tasks ({', '.join(cols)}) VALUES ({placeholders}) "
         f"ON CONFLICT(id) DO UPDATE SET {updates}"
     )
     with connect() as conn:
