@@ -1,19 +1,13 @@
 """Content page — WealthTechToday.com posts, ranked by views.
 
-**Views need Jetpack Stats, which is not yet connected.** The site *is*
-Jetpack-connected (WordPress.com site ID 205340970, verified 2026-07-22) and the
-ingest already fetches views when a token is present, so this is configuration
-only — no code left to write:
+View counts come from Jetpack Stats via the **site's own** REST API
+(`/wp-json/jetpack/v4/stats-app/…`), which proxies to WordPress.com over the
+existing Jetpack connection. It authenticates with the WordPress application
+password already configured for post metadata — no WordPress.com OAuth app and
+no separate token. See `ingest/wordpress.py`.
 
-1. Create a token at https://developer.wordpress.com/apps
-2. Add to `.streamlit/secrets.toml`:
-       WPCOM_API_TOKEN = "<token>"
-       WPCOM_SITE = "wealthtechtoday.com"
-3. Refresh WordPress from the Overview sidebar
-
-Until then every post reads 0 views, so the table sorts newest-first — sorting
-803 identical zeros would present an arbitrary order as a ranking. It switches
-to a real views ranking automatically once the token exists.
+If views ever read zero, the table falls back to newest-first rather than
+presenting an arbitrary order as a ranking.
 """
 from __future__ import annotations
 

@@ -253,7 +253,8 @@ def refresh_from_wordpress():
     if not base_url:
         st.error(
             "WORDPRESS_BASE_URL not configured in secrets. "
-            "Add WORDPRESS_BASE_URL (and optionally WORDPRESS_USER/WORDPRESS_APP_PASSWORD + WPCOM_API_TOKEN/WPCOM_SITE) to `.streamlit/secrets.toml`."
+            "Add WORDPRESS_BASE_URL, WORDPRESS_USER and WORDPRESS_APP_PASSWORD to `.streamlit/secrets.toml`. "
+            "View counts come through the same app password — no extra token needed."
         )
         return
     status = st.empty()
