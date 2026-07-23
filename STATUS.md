@@ -16,7 +16,7 @@ Last updated: 2026-06-14
 ### Data ingest (3 sources)
 - **HubSpot Service Key** — contacts, companies, forms, submissions, deals, tasks
 - **AuthoredUp API** — LinkedIn personal posts (Craig Iskowitz profile) + Ezra Group company page
-- **WordPress REST API** — WealthTechToday.com posts (post metadata; Jetpack stats optional)
+- **WordPress REST API** — WealthTechToday.com posts, plus Jetpack view counts via the site's own `/wp-json/jetpack/v4/stats-app/` endpoint
 
 ### Pages
 - **Marketing Command Center** (`app.py`) — exception-based, deal-focused Overview (redesigned 2026-06-14). Top to bottom: header w/ Asana 90-Day Strategy link → **⚡ Do This Now** action queue → 4 Critical KPIs → **🔥 Hot Deals** → **🎯 Qualified Leads**. All secondary content (form spotlights, LinkedIn KPIs, source/week charts, operational counts, hygiene signals) was removed from the Overview and lives on the sub-pages.
@@ -51,7 +51,7 @@ Open deals ranked by a blended score: **value 0.5 · close-date proximity 0.3 ·
 - **Hot Accounts shows "No ICP firms" message** — needs more Company.firm_type classification in HubSpot to populate. Craig is enriching via HubSpot AI.
 - **Pre-Feb 2026 data is suppressed** in period-over-period deltas (HubSpot adoption was Feb 2026). Adjustable via sidebar "Trust data from" date.
 - **LinkedIn share / impression / reach metrics are NULL** from AuthoredUp — LinkedIn API restriction, not a bug. Reactions + comments + engagement rate are reliable.
-- **Jetpack/WordPress.com Stats not connected** — Content page shows post metadata only. To add view counts: get `WPCOM_API_TOKEN` from [developer.wordpress.com/apps](https://developer.wordpress.com/apps).
+- ~~**Jetpack/WordPress.com Stats not connected**~~ **Resolved 2026-07-22.** No WordPress.com OAuth token was ever needed — the site proxies its own Jetpack stats at `/wp-json/jetpack/v4/stats-app/sites/{id}/stats/top-posts`, authenticated with the WordPress app password already in secrets. 3,673 views (30d) / 149,660 all-time now live on the Content page.
 - **Deals/tasks scopes confirmed working** (2026-06-13 refresh: 718 deals, 440 tasks). If tasks count is 0, the `crm.objects.tasks.read` scope may not be added yet.
 - **Open-deals KPI** now derives "closed" from HubSpot pipeline-stage `isClosed` metadata (pulled at ingest), not hardcoded `closedwon`/`closedlost` literals — the portal uses custom numeric stage IDs across 3 pipelines, so the old literal filter counted every deal as open.
 
@@ -106,7 +106,7 @@ git config user.name "Craig Iskowitz"
 | `WORDPRESS_BASE_URL` | Yes (for Content tab) | `https://wealthtechtoday.com` |
 | `WORDPRESS_USER` | Optional (read drafts) | Your WP username |
 | `WORDPRESS_APP_PASSWORD` | Optional | WP admin → Users → Profile → Application Passwords |
-| `WPCOM_API_TOKEN` | Optional (Jetpack views) | [developer.wordpress.com/apps](https://developer.wordpress.com/apps) |
+| ~~`WPCOM_API_TOKEN`~~ | **Not used** | Superseded 2026-07-22 — views come through `WORDPRESS_APP_PASSWORD` |
 | `WPCOM_SITE` | Required if using `WPCOM_API_TOKEN` | `wealthtechtoday.com` |
 
 ## HubSpot Service Key scopes currently in use
@@ -173,7 +173,6 @@ Edit these in `app.py` directly as new internal/vendor/partner contacts surface.
 
 ## Open items / next session ideas
 
-1. **Connect Jetpack stats** to populate WordPress view counts on the Content tab
 2. **HubSpot deep-link from company name** in Hot Accounts table (clickable)
 3. **Email engagement in Hot Accounts heat score** (currently only counts form fills)
 4. **LinkedIn → HubSpot crossover**: commenters on Craig's posts who are already HubSpot contacts (warmest possible leads — but requires matching LinkedIn URN to HubSpot contact, which is non-trivial)
