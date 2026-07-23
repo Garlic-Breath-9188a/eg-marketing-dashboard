@@ -25,6 +25,7 @@ import pandas as pd
 import streamlit as st
 
 from classify import followup, pipeline, priority
+from classify.company_link import CompanyResolver
 from store import db
 
 st.set_page_config(page_title="Daily Briefing — EG", page_icon="🗞️", layout="wide")
@@ -91,6 +92,7 @@ if lagging:
 
 # --- headline numbers ------------------------------------------------------
 asana, hs_tasks, deals = _table("asana_tasks"), _table("tasks"), _table("deals")
+company_resolver = CompanyResolver(_table("companies"), deals, _table("contacts"))
 active = pipeline.active_tasks(hs_tasks)
 open_deals = pipeline.open_deals(deals)
 
@@ -164,7 +166,8 @@ if not active.empty:
         if _is_date(d) and d < today:
             p = priority.compute(d, r["priority"])
             overdue_rows.append({
-                "When": p.label, "Source": "HubSpot", "Task": r["subject"], "Company": None,
+                "When": p.label, "Source": "HubSpot", "Task": r["subject"],
+                "Company": company_resolver.for_task(r),
                 "Link": f"{HUBSPOT_BASE}/tasks/{HUBSPOT_PORTAL_ID}/view/all/task/{r['id']}",
                 "_s": p.score})
 

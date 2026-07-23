@@ -217,13 +217,19 @@ class HubSpotClient:
             after = paging["after"]
 
     def iter_tasks(self) -> Iterator[dict]:
-        """Yield raw task objects with deal + contact associations."""
+        """Yield raw task objects with deal, contact and company associations.
+
+        Companies matter on their own: a task can be attached directly to a
+        company with no deal and no contact, and that was invisible until
+        2026-07-23 — the dashboard rendered "None" for tasks HubSpot clearly
+        showed against a company.
+        """
         after = None
         while True:
             params = {
                 "limit": 100,
                 "properties": ",".join(TASK_PROPS),
-                "associations": "deals,contacts",
+                "associations": "deals,contacts,companies",
             }
             if after:
                 params["after"] = after
@@ -453,6 +459,7 @@ def refresh(token: str, progress=None) -> dict:
         assoc = t.get("associations", {}) or {}
         deals_assoc = [d.get("id") for d in assoc.get("deals", {}).get("results", []) if d.get("id")]
         contacts_assoc = [c.get("id") for c in assoc.get("contacts", {}).get("results", []) if c.get("id")]
+        companies_assoc = [c.get("id") for c in assoc.get("companies", {}).get("results", []) if c.get("id")]
         task_rows.append({
             "id": t["id"],
             "subject": props.get("hs_task_subject"),
@@ -464,6 +471,7 @@ def refresh(token: str, progress=None) -> dict:
             "hubspot_owner_id": props.get("hubspot_owner_id"),
             "associated_deal_ids": ",".join(deals_assoc) if deals_assoc else None,
             "associated_contact_ids": ",".join(contacts_assoc) if contacts_assoc else None,
+            "associated_company_ids": ",".join(companies_assoc) if companies_assoc else None,
             "fetched_at": fetched_at,
         })
     db.upsert_tasks(task_rows)

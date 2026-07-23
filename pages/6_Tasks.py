@@ -36,6 +36,7 @@ import pandas as pd
 import streamlit as st
 
 from classify import pipeline, priority
+from classify.company_link import CompanyResolver
 from ingest import outlook
 from store import db
 
@@ -78,7 +79,7 @@ def _rows_from_asana(df: pd.DataFrame) -> list[dict]:
     ]
 
 
-def _rows_from_hubspot_tasks(df: pd.DataFrame) -> list[dict]:
+def _rows_from_hubspot_tasks(df: pd.DataFrame, resolver: CompanyResolver) -> list[dict]:
     active = pipeline.active_tasks(df)
     if active.empty:
         return []
@@ -87,7 +88,7 @@ def _rows_from_hubspot_tasks(df: pd.DataFrame) -> list[dict]:
         {
             "Source": "HubSpot",
             "Task": r["subject"],
-            "Company": None,
+            "Company": resolver.for_task(r),
             "Context": (r["task_type"] or "").replace("_", " ").title(),
             "_priority": priority.compute(d, r["priority"]),
             "Link": f"{HUBSPOT_BASE}/tasks/{HUBSPOT_PORTAL_ID}/view/all/task/{r['id']}",
@@ -96,7 +97,7 @@ def _rows_from_hubspot_tasks(df: pd.DataFrame) -> list[dict]:
     ]
 
 
-def _rows_from_deals(df: pd.DataFrame) -> list[dict]:
+def _rows_from_deals(df: pd.DataFrame, resolver: CompanyResolver) -> list[dict]:
     open_ = pipeline.open_deals(df)
     if open_.empty:
         return []
@@ -107,7 +108,7 @@ def _rows_from_deals(df: pd.DataFrame) -> list[dict]:
         rows.append({
             "Source": "Deal",
             "Task": r["name"],
-            "Company": None,
+            "Company": resolver.for_deal(r),
             "Context": f"${amount:,.0f}" if pd.notna(amount) else (r.get("stage_label") or ""),
             "_priority": priority.compute(d, None, is_deal=True),
             "Link": f"{HUBSPOT_BASE}/contacts/{HUBSPOT_PORTAL_ID}/record/0-3/{r['id']}",
@@ -164,8 +165,10 @@ def _rows_from_outlook(df: pd.DataFrame) -> list[dict]:
 def load_unified() -> pd.DataFrame:
     rows: list[dict] = []
     rows += _rows_from_asana(_table("asana_tasks"))
-    rows += _rows_from_hubspot_tasks(_table("tasks"))
-    rows += _rows_from_deals(_table("deals"))
+    deals_df = _table("deals")
+    resolver = CompanyResolver(_table("companies"), deals_df, _table("contacts"))
+    rows += _rows_from_hubspot_tasks(_table("tasks"), resolver)
+    rows += _rows_from_deals(deals_df, resolver)
     rows += _rows_from_slack(_table("slack_items"))
     rows += _rows_from_outlook(_table("outlook_messages"))
     if not rows:

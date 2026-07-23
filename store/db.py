@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     hubspot_owner_id TEXT,
     associated_deal_ids TEXT,      -- comma-separated
     associated_contact_ids TEXT,   -- comma-separated
+    associated_company_ids TEXT,   -- comma-separated
     fetched_at TEXT
 );
 
@@ -295,6 +296,9 @@ def _migrate() -> None:
         "hubspot_owner_id": "TEXT",
         "hubspot_url": "TEXT",
     }
+    new_task_cols = {
+        "associated_company_ids": "TEXT",
+    }
     new_deal_cols = {
         "stage_is_closed": "INTEGER",
         "stage_is_won": "INTEGER",
@@ -305,6 +309,10 @@ def _migrate() -> None:
         for col, col_type in new_contact_cols.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE contacts ADD COLUMN {col} {col_type}")
+        existing_task_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+        for col, col_type in new_task_cols.items():
+            if col not in existing_task_cols:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
         existing_deal_cols = {row["name"] for row in conn.execute("PRAGMA table_info(deals)")}
         for col, col_type in new_deal_cols.items():
             if col not in existing_deal_cols:
@@ -571,7 +579,8 @@ def upsert_tasks(rows: list[dict]) -> None:
         return
     cols = [
         "id", "subject", "status", "priority", "task_type", "due_at", "completed_at",
-        "hubspot_owner_id", "associated_deal_ids", "associated_contact_ids", "fetched_at",
+        "hubspot_owner_id", "associated_deal_ids", "associated_contact_ids",
+        "associated_company_ids", "fetched_at",
     ]
     placeholders = ", ".join("?" for _ in cols)
     updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
