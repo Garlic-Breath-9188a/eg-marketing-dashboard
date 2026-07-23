@@ -162,16 +162,19 @@ New modules under `ingest/`, mirroring the existing `hubspot.py` shape
 - [ ] Sent Items scan in `ingest/outlook.py`
 - [ ] `pages/7_Follow_ups.py` + red count on the briefing page
 
-### Phase 4 — Split out the Fathom agent
+### Phase 4 — Split out the Fathom agent ✅ done 2026-07-22
 
-- [ ] New sibling project `Fathom Agent/` containing only the meeting-intelligence
-      half of `server.js` (lines ~793-1400: poll, classify, Claude analysis,
-      Asana/HubSpot task creation) plus `agents/meeting-intelligence/instructions/`
-      and `.fathom-processed.json`. Own git repo.
-- [ ] Point launchd `com.ezragroup.roland-dashboard` at it, or relabel to
-      `com.ezragroup.fathom-agent`. **If the folder is renamed, update
-      `WorkingDirectory` in the plist in the same step** — a stale path here
-      caused the 6-day silent crash-loop in July.
+- [x] `Fathom Agent/` created — commit `0c9d737`, own git repo. 14 functions and
+      5 routes extracted by marker. `cachedTasks` (the retired task server's
+      in-memory cache) replaced with direct HubSpot lookups.
+      ⚠️ Two bugs the smoke test caught: `const` where `server.js` had `let` on
+      `fathomProcessedCalls` (would have reprocessed all 48 past calls and
+      duplicated their tasks), and a bare `dotenv.config()` that finds nothing
+      under launchd (cwd is `/`). Both now resolve from `__dirname`.
+- [x] `com.ezragroup.fathom-agent` installed and verified; the old plist moved
+      to `…roland-dashboard.plist.retired-20260722`. The new plist has **no**
+      `WorkingDirectory` at all — the script resolves everything from
+      `__dirname`, so the July failure mode cannot recur.
 - [ ] Resolve the duplicate-Outlook-draft overlap with the Zapier Zap.
 
 ### Phase 5 — Decommission
@@ -190,13 +193,13 @@ New modules under `ingest/`, mirroring the existing `hubspot.py` shape
 - [x] `pages/0_Daily_Briefing.py` — commit `1e108c2`. Outbound touch count and
       campaign-status narrative are **not** reproduced; both needed a model pass
       over Sent Items. Stated on the page rather than dropped silently.
-- [ ] Retire the Express server: `/dashboard`, `/cos`, `/editor`, `/api/*`.
+- [x] Express server retired 2026-07-22. `Sales Task Dashboard/RETIRED.md` maps where each piece went.
       ⚠️ **Blocked on Phase 4.** `server.js` still hosts the Fathom →
       Asana/HubSpot task creation, and Paperclip's CEO agent polls
       `localhost:3001/api/fathom/*` to keep it healthy. Extract the agent first.
 - [ ] Zapier Zap 273528709 Step 16 (Slack `#sales` post) — Craig's call whether
       that one goes too; transcript filing to SharePoint should stay either way.
-- [ ] Archive `Sales Task Dashboard/` once the Fathom agent is extracted.
+- [x] `Sales Task Dashboard/` archived — not running, git history intact.
 - [ ] Update `STATUS.md` in the merged repo; delete the old one.
 
 ## Zapier Zap 273528709 — ✅ done 2026-07-22 (published as v40)
