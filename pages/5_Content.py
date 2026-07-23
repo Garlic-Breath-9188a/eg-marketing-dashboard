@@ -1,4 +1,20 @@
-"""Content page — WealthTechToday.com posts and (optional) Jetpack stats."""
+"""Content page — WealthTechToday.com posts, ranked by views.
+
+**Views need Jetpack Stats, which is not yet connected.** The site *is*
+Jetpack-connected (WordPress.com site ID 205340970, verified 2026-07-22) and the
+ingest already fetches views when a token is present, so this is configuration
+only — no code left to write:
+
+1. Create a token at https://developer.wordpress.com/apps
+2. Add to `.streamlit/secrets.toml`:
+       WPCOM_API_TOKEN = "<token>"
+       WPCOM_SITE = "wealthtechtoday.com"
+3. Refresh WordPress from the Overview sidebar
+
+Until then every post reads 0 views, so the table sorts newest-first — sorting
+803 identical zeros would present an arbitrary order as a ranking. It switches
+to a real views ranking automatically once the token exists.
+"""
 from __future__ import annotations
 
 import pandas as pd
@@ -28,7 +44,7 @@ def load_wp_posts() -> pd.DataFrame:
 
 
 st.title("📰 Content Performance")
-st.caption("WealthTechToday.com posts. View counts require Jetpack Stats (WordPress.com token).")
+st.caption("WealthTechToday.com posts and publishing cadence.")
 
 posts = load_wp_posts()
 
@@ -66,14 +82,9 @@ if has_stats:
     posts_sorted = posts.sort_values("views_30d", ascending=False, na_position="last")
 else:
     st.subheader("Posts — newest first")
-    st.info(
-        "**View counts are unavailable**, so these are sorted by date instead. "
-        "Views need Jetpack Stats: create a token at "
-        "[developer.wordpress.com/apps](https://developer.wordpress.com/apps), then add "
-        "`WPCOM_API_TOKEN` and `WPCOM_SITE = \"wealthtechtoday.com\"` to "
-        "`.streamlit/secrets.toml` and refresh WordPress. The ingest already "
-        "fetches views when the token is present — nothing else to build.",
-        icon="📊",
+    st.caption(
+        "Sorted by date — view counts need Jetpack Stats. "
+        "[How to enable ↗](https://developer.wordpress.com/apps)"
     )
     posts_sorted = posts.sort_values("published_at", ascending=False, na_position="last")
 
@@ -105,7 +116,9 @@ st.dataframe(
 st.divider()
 st.subheader("Posting cadence")
 posts_with_date = posts[posts["published_at"].notna()].copy()
-posts_with_date["month"] = posts_with_date["published_at"].dt.to_period("M").dt.start_time
+posts_with_date["month"] = (
+    posts_with_date["published_at"].dt.tz_localize(None).dt.to_period("M").dt.start_time
+)
 monthly = posts_with_date.groupby("month").size().reset_index(name="posts")
 fig = px.bar(monthly.tail(24), x="month", y="posts")
 fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10),
