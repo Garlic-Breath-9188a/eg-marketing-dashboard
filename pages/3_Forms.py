@@ -152,7 +152,7 @@ display_cols = display[[
     "lifecyclestage": "Lifecycle",
 }).sort_values("Submitted", ascending=False)
 
-st.dataframe(display_cols, use_container_width=True, hide_index=True, height=460)
+st.dataframe(display_cols, width="stretch", hide_index=True, height=460)
 
 # CSV export — emails-first format optimized for HubSpot static list import.
 csv_df = display[[

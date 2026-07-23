@@ -130,7 +130,7 @@ top_by_comments = (
 # Truncate post text for display
 top_by_comments["Post text"] = top_by_comments["Post text"].str.slice(0, 140) + "…"
 st.dataframe(
-    top_by_comments, use_container_width=True, hide_index=True, height=380,
+    top_by_comments, width="stretch", hide_index=True, height=380,
     column_config={
         "Post text": st.column_config.TextColumn(width="large"),
         "Eng. rate": st.column_config.NumberColumn(format="%.2f%%"),
@@ -157,7 +157,7 @@ with left:
     fig = px.bar(weekly, x="week", y="posts")
     fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
                       xaxis_title=None, yaxis_title="Posts")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 with right:
     st.markdown("**Engagement per week** (reactions + comments + shares)")
@@ -166,7 +166,7 @@ with right:
                  color_discrete_sequence=["#1F4E79"])
     fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
                       xaxis_title=None, yaxis_title="Engagement")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 # ---- Top posts by engagement rate ----
 st.subheader("Highest engagement rate")
@@ -186,7 +186,7 @@ top_by_rate = (
 )
 top_by_rate["Post text"] = top_by_rate["Post text"].str.slice(0, 140) + "…"
 st.dataframe(
-    top_by_rate, use_container_width=True, hide_index=True, height=300,
+    top_by_rate, width="stretch", hide_index=True, height=300,
     column_config={
         "Post text": st.column_config.TextColumn(width="large"),
         "Eng. rate": st.column_config.NumberColumn(format="%.2f%%"),

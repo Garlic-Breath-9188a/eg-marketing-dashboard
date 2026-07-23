@@ -117,7 +117,7 @@ display = backlog[[
 
 st.dataframe(
     display,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "HubSpot link": st.column_config.LinkColumn("Open in HubSpot", display_text="Open ↗"),

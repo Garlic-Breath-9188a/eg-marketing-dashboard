@@ -922,7 +922,7 @@ else:
     hd["HubSpot"] = hd.apply(lambda r: _deal_url(r["id"], r.get("hubspot_url")), axis=1)
     st.dataframe(
         hd[["Deal", "Company", "Amount", "Stage", "Close date", "Days open", "Task due", "HubSpot"]],
-        use_container_width=True, hide_index=True, height=420,
+        width="stretch", hide_index=True, height=420,
         column_config={
             "Deal": st.column_config.TextColumn(width="medium"),
             "Company": st.column_config.TextColumn(width="medium"),
@@ -956,7 +956,7 @@ else:
     ql["HubSpot"] = ql["id"].apply(_contact_url)
     st.dataframe(
         ql[["Created", "Email", "Company", "Category", "Source", "HubSpot"]],
-        use_container_width=True, hide_index=True, height=420,
+        width="stretch", hide_index=True, height=420,
         column_config={
             "Email": st.column_config.TextColumn(width="medium"),
             "Company": st.column_config.TextColumn(width="medium"),

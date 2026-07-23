@@ -110,4 +110,4 @@ display = filtered[[
     "id": "HubSpot contact ID",
 }).sort_values("Created", ascending=False)
 
-st.dataframe(display, use_container_width=True, hide_index=True)
+st.dataframe(display, width="stretch", hide_index=True)
