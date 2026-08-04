@@ -98,6 +98,16 @@ class HubSpotClient:
         pid = data.get("portalId")
         return str(pid) if pid else None
 
+    def complete_task(self, task_id: str) -> None:
+        """Mark a HubSpot task COMPLETED. Requires the crm.objects.tasks.write scope
+        (raises HTTPError 403 if the Service Key doesn't have it)."""
+        resp = self.session.patch(
+            f"{BASE}/crm/v3/objects/tasks/{task_id}",
+            json={"properties": {"hs_task_status": "COMPLETED"}},
+            timeout=30,
+        )
+        resp.raise_for_status()
+
     def iter_contacts(self) -> Iterator[dict]:
         """Yield raw contact objects with companies association."""
         after = None
@@ -277,6 +287,11 @@ class HubSpotClient:
             if not paging:
                 break
             after = paging["after"]
+
+
+def complete_task(token: str, task_id: str) -> None:
+    """Mark a single HubSpot task COMPLETED (used by the dashboard action queue)."""
+    HubSpotClient(token).complete_task(task_id)
 
 
 def _first_company_id(contact: dict) -> str | None:

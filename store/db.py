@@ -81,6 +81,11 @@ CREATE TABLE IF NOT EXISTS dismissed_signals (
     dismissed_on TEXT  -- ISO date (YYYY-MM-DD) — signal hidden through this date inclusive
 );
 
+CREATE TABLE IF NOT EXISTS completed_actions (
+    action_key TEXT PRIMARY KEY,  -- e.g. "task:123", "deal:456", "hot:789"
+    done_at TEXT                   -- ISO timestamp when the user checked it off
+);
+
 CREATE TABLE IF NOT EXISTS linkedin_actors (
     id TEXT PRIMARY KEY,
     type TEXT,            -- 'profile' | 'company' | 'group'
@@ -520,6 +525,30 @@ def active_dismissals(today: str) -> set[str]:
             (today,),
         ).fetchall()
     return {r["signal_key"] for r in rows}
+
+
+def mark_action_done(action_key: str, done_at: str) -> None:
+    """Permanently mark a 'Do This Now' action as completed/cleared (no expiry)."""
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO completed_actions (action_key, done_at) VALUES (?, ?) "
+            "ON CONFLICT(action_key) DO UPDATE SET done_at=excluded.done_at",
+            (action_key, done_at),
+        )
+
+
+def done_action_keys() -> set[str]:
+    """Return the set of action_keys the user has checked off."""
+    with connect() as conn:
+        rows = conn.execute("SELECT action_key FROM completed_actions").fetchall()
+    return {r["action_key"] for r in rows}
+
+
+def set_task_status(task_id: str, status: str) -> None:
+    """Flip a cached task's status locally (e.g. to COMPLETED) so counts/queue update
+    immediately, before the next full HubSpot refresh."""
+    with connect() as conn:
+        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
 
 
 def upsert_linkedin_actors(rows: list[dict]) -> None:

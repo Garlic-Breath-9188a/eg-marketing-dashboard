@@ -153,8 +153,13 @@ New modules under `ingest/`, mirroring the existing `hubspot.py` shape
       the Slack DM: outbound touches, overdue, due today, campaign status,
       HubSpot campaign stats, weighted pipeline, top priority today. Fold the
       existing "⚡ Do This Now" queue into it rather than keeping both.
-- [ ] Task completion write-back (Asana `PUT`, HubSpot `PATCH`) — port from
-      `/api/complete/:id` (server.js:1700), **minus** the Slack thread reply.
+- [~] Task completion write-back — **HubSpot `PATCH` done 2026-08-04** via the
+      "⚡ Do This Now" checkboxes: checking a task row writes `hs_task_status=COMPLETED`
+      to HubSpot (`hubspot.complete_task`), flips the local cache, and clears the row;
+      non-task actions (deals/accounts/leads) just clear (persisted in a new
+      `completed_actions` table). ⚠️ Needs the `crm.objects.tasks.write` scope on the
+      Service Key — degrades to clear-only + a toast if missing. **Asana `PUT` still
+      pending**; Slack thread reply intentionally omitted.
 
 ### Phase 3b — Prospect follow-up tracker
 

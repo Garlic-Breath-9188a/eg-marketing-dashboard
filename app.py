@@ -771,6 +771,7 @@ if not overdue_tasks.empty:
             detail += f" · was due {due.strftime('%b %d')}"
         actions.append({
             "priority": 1, "icon": "🚨",
+            "type": "task", "id": t.get("id"), "key": f"task:{t.get('id')}",
             "title": f"Overdue task: {t.get('subject') or '(no subject)'}",
             "detail": detail,
             "link": _task_url(t.get("id")),
@@ -784,6 +785,7 @@ if not hot_accounts_df.empty:
         name = r.get("company_name") or r.get("company_domain") or r["company_id"]
         actions.append({
             "priority": 2, "icon": "🔥",
+            "type": "hot_account", "id": r["company_id"], "key": f"hot:{r['company_id']}",
             "title": f"Hot account: {name} — reach out",
             "detail": f"{int(r['contacts_engaged'])} contacts engaged · {int(r['submissions'])} form fills in {HEAT_WINDOW_DAYS}d · last touch {int(r['days_since'])}d ago",
             "link": _company_url(r["company_id"]),
@@ -797,6 +799,7 @@ if not closing_period.empty:
         cd = d.get("closedate")
         actions.append({
             "priority": 3, "icon": "💰",
+            "type": "deal", "id": d["id"], "key": f"deal:{d['id']}",
             "title": f"Advance to close: {d.get('name') or '(unnamed deal)'}",
             "detail": f"${amt:,.0f} · {d.get('stage_label') or d.get('dealstage') or 'stage n/a'} · closes {cd.strftime('%b %d') if pd.notna(cd) else 'TBD'}",
             "link": _deal_url(d["id"], d.get("hubspot_url")),
@@ -809,6 +812,7 @@ if not tasks_due_week.empty:
         due = t.get("due_at")
         actions.append({
             "priority": 4, "icon": "📌",
+            "type": "task", "id": t.get("id"), "key": f"task:{t.get('id')}",
             "title": f"Task due: {t.get('subject') or '(no subject)'}",
             "detail": f"due {due.strftime('%b %d') if pd.notna(due) else 'soon'}",
             "link": _task_url(t.get("id")),
@@ -819,6 +823,7 @@ if not tasks_due_week.empty:
 for _, c in stalled_leads_df.head(5).iterrows():
     actions.append({
         "priority": 5, "icon": "⏰",
+        "type": "contact", "id": c["id"], "key": f"stalled:{c['id']}",
         "title": f"Re-engage {c.get('email') or '(no email)'}",
         "detail": f"{c.get('lead_category') or c.get('firm_type') or 'ICP'} · quiet {int(c['_days_quiet'])}d · had prior pipeline activity",
         "link": _contact_url(c["id"]),
@@ -829,6 +834,7 @@ for _, c in stalled_leads_df.head(5).iterrows():
 for _, c in multi_touch_df.head(5).iterrows():
     actions.append({
         "priority": 6, "icon": "💎",
+        "type": "contact", "id": c["id"], "key": f"warm:{c['id']}",
         "title": f"Start the conversation: {c.get('email') or '(no email)'}",
         "detail": f"{int(c['_convs'])} form fills · zero deals · {c.get('lead_category') or c.get('firm_type') or 'ICP'}",
         "link": _contact_url(c["id"]),
@@ -837,6 +843,12 @@ for _, c in multi_touch_df.head(5).iterrows():
 
 st.markdown("#### ⚡ Do This Now")
 _ACTION_CAP = 12
+
+# Hide actions the user has already checked off (completed / cleared).
+_done_keys = db.done_action_keys()
+actions = [a for a in actions if a.get("key") not in _done_keys]
+_hubspot_token = st.secrets.get("HUBSPOT_TOKEN", "")
+
 if not actions:
     st.markdown(
         "<div style='padding:0.5rem 0.8rem; border-radius:6px; background:#e8f5e9; "
@@ -847,19 +859,44 @@ if not actions:
     )
 else:
     actions.sort(key=lambda a: a["priority"])
+    st.caption("Check a box to mark it done — tasks are set Completed in HubSpot; deals, accounts and leads just clear from this list.")
     for a in actions[:_ACTION_CAP]:
-        link_html = (
-            f" <a href='{a['link']}' target='_blank' style='font-size:0.78rem; text-decoration:none; color:#796eff;'>{a.get('link_label', 'Open ↗')}</a>"
-            if a.get("link") else ""
-        )
-        st.markdown(
-            f"<div style='padding:0.32rem 0.7rem; margin-bottom:0.22rem; border-radius:4px; "
-            f"background:#f7f8fb; border-left:3px solid #796eff; font-size:0.88rem;'>"
-            f"<b>{a['icon']} {a['title']}</b>{link_html}<br>"
-            f"<span style='color:#666; font-size:0.8rem;'>{a['detail']}</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        chk_col, body_col = st.columns([0.05, 0.95])
+        with chk_col:
+            checked = st.checkbox(
+                "done", key=f"done_{a.get('key', a['title'])}", label_visibility="collapsed",
+                help="Mark complete. Tasks → Completed in HubSpot; everything else clears from this list.",
+            )
+        with body_col:
+            link_html = (
+                f" <a href='{a['link']}' target='_blank' style='font-size:0.78rem; text-decoration:none; color:#796eff;'>{a.get('link_label', 'Open ↗')}</a>"
+                if a.get("link") else ""
+            )
+            st.markdown(
+                f"<div style='padding:0.32rem 0.7rem; margin-bottom:0.22rem; border-radius:4px; "
+                f"background:#f7f8fb; border-left:3px solid #796eff; font-size:0.88rem;'>"
+                f"<b>{a['icon']} {a['title']}</b>{link_html}<br>"
+                f"<span style='color:#666; font-size:0.8rem;'>{a['detail']}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        if checked:
+            # Real tasks: write COMPLETED back to HubSpot + flip local cache. Others: just clear.
+            # st.toast survives the rerun below, so the sync result stays visible.
+            if a.get("type") == "task" and a.get("id") and _hubspot_token:
+                try:
+                    hubspot.complete_task(_hubspot_token, str(a["id"]))
+                    db.set_task_status(str(a["id"]), "COMPLETED")
+                    load_tasks.clear()
+                    st.toast("Task marked Completed in HubSpot.", icon="✅")
+                except Exception as e:
+                    st.toast(
+                        f"Cleared here, but HubSpot sync failed ({e}). "
+                        "Add the crm.objects.tasks.write scope to sync completion.",
+                        icon="⚠️",
+                    )
+            db.mark_action_done(a.get("key", a["title"]), db.now_iso())
+            st.rerun()
     if len(actions) > _ACTION_CAP:
         st.caption(f"+ {len(actions) - _ACTION_CAP} more lower-priority actions (re-engage / start-conversation) — see Hot Deals & Qualified Leads below.")
 
