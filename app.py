@@ -678,6 +678,34 @@ else:
 
 urgent_deal_ids = _deal_ids_with_urgent_tasks(active_tasks)
 
+# Open-deal lookups: the deal-focused "Do This Now" queue only surfaces tasks tied
+# to an open deal, and Hot Deals shows each deal's next scheduled task.
+open_deal_ids = set(open_deals["id"].astype(str)) if not open_deals.empty else set()
+open_deal_names = (
+    open_deals.assign(_sid=open_deals["id"].astype(str)).set_index("_sid")["name"].to_dict()
+    if not open_deals.empty else {}
+)
+
+
+def _task_open_deals(task_row) -> list[str]:
+    """Open-deal IDs this task is associated with (empty list if none)."""
+    ids = task_row.get("associated_deal_ids")
+    if not ids:
+        return []
+    return [d.strip() for d in str(ids).split(",") if d.strip() in open_deal_ids]
+
+
+# deal_id -> soonest active-task due date (drives the Hot Deals "Next action" column)
+deal_next_due: dict[str, pd.Timestamp] = {}
+if not active_tasks.empty and "associated_deal_ids" in active_tasks.columns:
+    for _, _t in active_tasks.iterrows():
+        _due = _t.get("due_at")
+        if pd.isna(_due):
+            continue
+        for _did in _task_open_deals(_t):
+            if _did not in deal_next_due or _due < deal_next_due[_did]:
+                deal_next_due[_did] = _due
+
 # Company-name lookup for the deal + lead tables
 company_name_lookup = companies.set_index("id")["name"].to_dict() if not companies.empty else {}
 
@@ -812,46 +840,47 @@ def _complete_hubspot_task(token: str, task_id: str) -> None:
 # ===========================================================================
 # 1) ⚡ DO THIS NOW — exception-based action queue
 # ===========================================================================
-actions: list[dict] = []
+actions: list[dict] = []       # deal-focused: follow-ups that advance OPEN pipeline
+lead_actions: list[dict] = []  # pipeline generation: accounts & leads to work
 
-# Priority 1 — overdue tasks (already late)
-if not overdue_tasks.empty:
-    for _, t in overdue_tasks.sort_values("due_at").head(8).iterrows():
+
+def _open_deal_task_rows(task_df: pd.DataFrame) -> pd.DataFrame:
+    """Filter a task slice to only tasks associated with an open deal, tagging each
+    with the open-deal IDs it touches."""
+    if task_df.empty:
+        return task_df
+    out = task_df.copy()
+    out["_open_deals"] = out.apply(_task_open_deals, axis=1)
+    return out[out["_open_deals"].apply(len) > 0]
+
+
+# Priority 1 — overdue tasks ON AN OPEN DEAL
+_overdue_deal_tasks = _open_deal_task_rows(overdue_tasks)
+if not _overdue_deal_tasks.empty:
+    for _, t in _overdue_deal_tasks.sort_values("due_at").head(10).iterrows():
         due = t.get("due_at")
         days_late = (now_ts - due).days if pd.notna(due) else None
+        deal_nm = open_deal_names.get(t["_open_deals"][0]) or "(deal)"
         detail = (f"{days_late}d late" if days_late is not None else "overdue")
         if pd.notna(due):
             detail += f" · was due {due.strftime('%b %d')}"
+        detail += f" · deal: {deal_nm}"
         actions.append({
             "priority": 1, "icon": "🚨",
             "type": "task", "id": t.get("id"), "key": f"task:{t.get('id')}",
-            "title": f"Overdue task: {t.get('subject') or '(no subject)'}",
+            "title": f"Overdue: {t.get('subject') or '(no subject)'}",
             "detail": detail,
             "link": _task_url(t.get("id")),
             "link_label": "Open in HubSpot ↗",
         })
 
-# Priority 2 — hot accounts to call (3+ contacts engaged)
-if not hot_accounts_df.empty:
-    very_hot = hot_accounts_df[hot_accounts_df["contacts_engaged"] >= 3]
-    for _, r in very_hot.head(5).iterrows():
-        name = r.get("company_name") or r.get("company_domain") or r["company_id"]
-        actions.append({
-            "priority": 2, "icon": "🔥",
-            "type": "hot_account", "id": r["company_id"], "key": f"hot:{r['company_id']}",
-            "title": f"Hot account: {name} — reach out",
-            "detail": f"{int(r['contacts_engaged'])} contacts engaged · {int(r['submissions'])} form fills in {HEAT_WINDOW_DAYS}d · last touch {int(r['days_since'])}d ago",
-            "link": _company_url(r["company_id"]),
-            "link_label": "View company ↗",
-        })
-
-# Priority 3 — open deals closing this period
+# Priority 2 — open deals closing this period
 if not closing_period.empty:
-    for _, d in closing_period.sort_values("amount", ascending=False).head(5).iterrows():
+    for _, d in closing_period.sort_values("amount", ascending=False).head(8).iterrows():
         amt = d.get("amount") or 0
         cd = d.get("closedate")
         actions.append({
-            "priority": 3, "icon": "💰",
+            "priority": 2, "icon": "💰",
             "type": "deal", "id": d["id"], "key": f"deal:{d['id']}",
             "title": f"Advance to close: {d.get('name') or '(unnamed deal)'}",
             "detail": f"${amt:,.0f} · {d.get('stage_label') or d.get('dealstage') or 'stage n/a'} · closes {cd.strftime('%b %d') if pd.notna(cd) else 'TBD'}",
@@ -859,23 +888,38 @@ if not closing_period.empty:
             "link_label": "View deal ↗",
         })
 
-# Priority 4 — tasks due in the next 7 days
-if not tasks_due_week.empty:
-    for _, t in tasks_due_week.sort_values("due_at").head(6).iterrows():
+# Priority 3 — tasks due in the next 7 days ON AN OPEN DEAL
+_due_deal_tasks = _open_deal_task_rows(tasks_due_week)
+if not _due_deal_tasks.empty:
+    for _, t in _due_deal_tasks.sort_values("due_at").head(8).iterrows():
         due = t.get("due_at")
+        deal_nm = open_deal_names.get(t["_open_deals"][0]) or "(deal)"
         actions.append({
-            "priority": 4, "icon": "📌",
+            "priority": 3, "icon": "📌",
             "type": "task", "id": t.get("id"), "key": f"task:{t.get('id')}",
             "title": f"Task due: {t.get('subject') or '(no subject)'}",
-            "detail": f"due {due.strftime('%b %d') if pd.notna(due) else 'soon'}",
+            "detail": f"due {due.strftime('%b %d') if pd.notna(due) else 'soon'} · deal: {deal_nm}",
             "link": _task_url(t.get("id")),
             "link_label": "Open in HubSpot ↗",
         })
 
-# Priority 5 — stalled leads to re-engage
+# ---- Pipeline generation (accounts & leads) — kept out of the deal action queue ----
+if not hot_accounts_df.empty:
+    very_hot = hot_accounts_df[hot_accounts_df["contacts_engaged"] >= 3]
+    for _, r in very_hot.head(5).iterrows():
+        name = r.get("company_name") or r.get("company_domain") or r["company_id"]
+        lead_actions.append({
+            "priority": 1, "icon": "🔥",
+            "type": "hot_account", "id": r["company_id"], "key": f"hot:{r['company_id']}",
+            "title": f"Hot account: {name} — reach out",
+            "detail": f"{int(r['contacts_engaged'])} contacts engaged · {int(r['submissions'])} form fills in {HEAT_WINDOW_DAYS}d · last touch {int(r['days_since'])}d ago",
+            "link": _company_url(r["company_id"]),
+            "link_label": "View company ↗",
+        })
+
 for _, c in stalled_leads_df.head(5).iterrows():
-    actions.append({
-        "priority": 5, "icon": "⏰",
+    lead_actions.append({
+        "priority": 2, "icon": "⏰",
         "type": "contact", "id": c["id"], "key": f"stalled:{c['id']}",
         "title": f"Re-engage {c.get('email') or '(no email)'}",
         "detail": f"{c.get('lead_category') or c.get('firm_type') or 'ICP'} · quiet {int(c['_days_quiet'])}d · had prior pipeline activity",
@@ -883,10 +927,9 @@ for _, c in stalled_leads_df.head(5).iterrows():
         "link_label": "View contact ↗",
     })
 
-# Priority 6 — multi-touch warm leads with no deal
 for _, c in multi_touch_df.head(5).iterrows():
-    actions.append({
-        "priority": 6, "icon": "💎",
+    lead_actions.append({
+        "priority": 3, "icon": "💎",
         "type": "contact", "id": c["id"], "key": f"warm:{c['id']}",
         "title": f"Start the conversation: {c.get('email') or '(no email)'}",
         "detail": f"{int(c['_convs'])} form fills · zero deals · {c.get('lead_category') or c.get('firm_type') or 'ICP'}",
@@ -894,31 +937,24 @@ for _, c in multi_touch_df.head(5).iterrows():
         "link_label": "View contact ↗",
     })
 
-st.markdown("#### ⚡ Do This Now")
-_ACTION_CAP = 12
-
-# Hide actions the user has already checked off (completed / cleared).
-_done_keys = _done_action_keys()
-actions = [a for a in actions if a.get("key") not in _done_keys]
 _hubspot_token = st.secrets.get("HUBSPOT_TOKEN", "")
 
-if not actions:
-    st.markdown(
-        "<div style='padding:0.5rem 0.8rem; border-radius:6px; background:#e8f5e9; "
-        "border-left:4px solid #4caf50; font-size:0.9rem;'>"
-        "<b>✅ You're clear.</b> No overdue tasks, hot accounts, or stalled leads need you right now — keep the pipeline fed."
-        "</div>",
-        unsafe_allow_html=True,
-    )
-else:
-    actions.sort(key=lambda a: a["priority"])
-    st.caption("Check a box to mark it done — tasks are set Completed in HubSpot; deals, accounts and leads just clear from this list.")
-    for a in actions[:_ACTION_CAP]:
+
+def _render_action_queue(action_list: list[dict], cap: int, empty_html: str) -> None:
+    """Render a checkbox-per-row action list. Checking a task completes it in HubSpot;
+    checking anything else just clears it. Both persist via completed_actions."""
+    done = _done_action_keys()
+    items = [a for a in action_list if a.get("key") not in done]
+    if not items:
+        st.markdown(empty_html, unsafe_allow_html=True)
+        return
+    items.sort(key=lambda a: a["priority"])
+    for a in items[:cap]:
         chk_col, body_col = st.columns([0.05, 0.95])
         with chk_col:
             checked = st.checkbox(
                 "done", key=f"done_{a.get('key', a['title'])}", label_visibility="collapsed",
-                help="Mark complete. Tasks → Completed in HubSpot; everything else clears from this list.",
+                help="Mark done. Tasks → Completed in HubSpot; everything else clears from this list.",
             )
         with body_col:
             link_html = (
@@ -934,15 +970,12 @@ else:
                 unsafe_allow_html=True,
             )
         if checked:
-            # Real tasks: write COMPLETED back to HubSpot + flip local cache. Others: just clear.
             # st.toast survives the rerun below, so the sync result stays visible.
             if a.get("type") == "task" and a.get("id") and _hubspot_token:
                 try:
                     _complete_hubspot_task(_hubspot_token, str(a["id"]))
                     st.toast("Task marked Completed in HubSpot.", icon="✅")
-                    # Best-effort local reconcile so counts update before the next
-                    # refresh; its failure must NOT be reported as a HubSpot failure.
-                    try:
+                    try:  # best-effort local reconcile; must not mislabel a HubSpot success
                         _set_local_task_completed(str(a["id"]))
                         load_tasks.clear()
                     except Exception:
@@ -955,8 +988,24 @@ else:
                     )
             _mark_action_done(a.get("key", a["title"]))
             st.rerun()
-    if len(actions) > _ACTION_CAP:
-        st.caption(f"+ {len(actions) - _ACTION_CAP} more lower-priority actions (re-engage / start-conversation) — see Hot Deals & Qualified Leads below.")
+    if len(items) > cap:
+        st.caption(f"+ {len(items) - cap} more.")
+
+
+st.markdown("#### ⚡ Do This Now")
+st.caption("Follow-ups on **open deals** only — overdue/due tasks tied to live pipeline, plus deals closing this period. Check a box to mark done (tasks are set Completed in HubSpot).")
+_render_action_queue(
+    actions, 12,
+    "<div style='padding:0.5rem 0.8rem; border-radius:6px; background:#e8f5e9; "
+    "border-left:4px solid #4caf50; font-size:0.9rem;'>"
+    "<b>✅ Pipeline's clear.</b> No overdue or due-soon tasks on open deals, and nothing closing that needs a push.</div>",
+)
+
+with st.expander(f"🌱 Pipeline generation — accounts & leads to work ({len(lead_actions)})", expanded=False):
+    _render_action_queue(
+        lead_actions, 15,
+        "<div style='font-size:0.85rem; color:#666;'>No hot accounts or stalled / warm leads right now.</div>",
+    )
 
 
 # ===========================================================================
@@ -1012,18 +1061,29 @@ else:
     hd["Amount"] = hd["amount"].fillna(0)
     hd["Stage"] = hd["stage_label"].fillna(hd["dealstage"])
     hd["Close date"] = hd["closedate"].dt.date if "closedate" in hd.columns else None
-    hd["Days open"] = (now_ts - hd["createdate"]).dt.days if "createdate" in hd.columns else None
-    hd["Task due"] = hd["has_urgent_task"].map({True: "● due/overdue", False: ""})
+    if "createdate" in hd.columns:
+        _created = pd.to_datetime(hd["createdate"], errors="coerce", utc=True)
+        hd["Days open"] = (now_ts - _created).dt.days.astype("Int64")
+    else:
+        hd["Days open"] = pd.array([pd.NA] * len(hd), dtype="Int64")
+
+    def _next_action(deal_id) -> str:
+        due = deal_next_due.get(str(deal_id))
+        if due is None:
+            return "⚠ none"
+        return f"overdue · {due.strftime('%b %d')}" if due < now_ts else due.strftime("%b %d")
+
+    hd["Next action"] = hd["id"].apply(_next_action)
     hd["HubSpot"] = hd.apply(lambda r: _deal_url(r["id"], r.get("hubspot_url")), axis=1)
     st.dataframe(
-        hd[["Deal", "Company", "Amount", "Stage", "Close date", "Days open", "Task due", "HubSpot"]],
+        hd[["Deal", "Company", "Amount", "Stage", "Close date", "Days open", "Next action", "HubSpot"]],
         width="stretch", hide_index=True, height=420,
         column_config={
             "Deal": st.column_config.TextColumn(width="medium"),
             "Company": st.column_config.TextColumn(width="medium"),
             "Amount": st.column_config.NumberColumn(format="$%d", width="small"),
-            "Days open": st.column_config.NumberColumn(width="small"),
-            "Task due": st.column_config.TextColumn(width="small", help="Has an active task overdue or due within 14 days"),
+            "Days open": st.column_config.NumberColumn(width="small", help="Days since the deal was created"),
+            "Next action": st.column_config.TextColumn(width="small", help="Next scheduled task on the deal — '⚠ none' means no task is set"),
             "HubSpot": st.column_config.LinkColumn("Open", display_text="Open ↗", width="small"),
         },
     )
@@ -1043,19 +1103,37 @@ if ql.empty:
     st.info("No engaged ICP firms in the selected period for this motion.")
 else:
     ql = ql.sort_values("createdate", ascending=False).head(25)
+
+    def _as_date(v):
+        if v is None or (isinstance(v, float) and v != v) or v == "":
+            return None
+        try:
+            ts = pd.Timestamp(v)
+            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+            return ts.date()
+        except (ValueError, TypeError):
+            return None
+
     ql["Created"] = ql["createdate"].dt.date
     ql["Email"] = ql["email"]
     ql["Company"] = ql["company_id"].apply(lambda c: company_name_lookup.get(c) if c else None)
     ql["Category"] = ql["lead_category"]
-    ql["Source"] = ql["hs_analytics_source"]
+    ql["Source"] = ql["hs_analytics_source"] if "hs_analytics_source" in ql.columns else None
+    ql["Came in on"] = ql["first_conversion_event_name"] if "first_conversion_event_name" in ql.columns else None
+    ql["Last contacted"] = (
+        ql["notes_last_contacted"].apply(_as_date) if "notes_last_contacted" in ql.columns else None
+    )
     ql["HubSpot"] = ql["id"].apply(_contact_url)
     st.dataframe(
-        ql[["Created", "Email", "Company", "Category", "Source", "HubSpot"]],
+        ql[["Created", "Email", "Company", "Category", "Source", "Came in on", "Last contacted", "HubSpot"]],
         width="stretch", hide_index=True, height=420,
         column_config={
             "Email": st.column_config.TextColumn(width="medium"),
             "Company": st.column_config.TextColumn(width="medium"),
             "Category": st.column_config.TextColumn(width="small"),
+            "Source": st.column_config.TextColumn(width="small", help="HubSpot original source — the channel they arrived through"),
+            "Came in on": st.column_config.TextColumn(width="medium", help="First conversion — the form/campaign that first captured them"),
+            "Last contacted": st.column_config.DateColumn(width="small", help="Most recent logged contact (HubSpot notes_last_contacted)"),
             "HubSpot": st.column_config.LinkColumn("Open", display_text="Open ↗", width="small"),
         },
     )
