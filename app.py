@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from classify import companies as _companies
@@ -756,6 +757,58 @@ n_overdue = len(overdue_tasks)
 n_due_week = len(tasks_due_week)
 
 
+# ---------------------------------------------------------------------------
+# Completed-action persistence + HubSpot task completion.
+# Implemented HERE (not via new store.db / ingest.hubspot functions) on purpose:
+# Streamlit Cloud caches imported modules, so newly-added module functions can be
+# missing until a full process restart. app.py is always re-read fresh, and it
+# leans only on the long-stable db.connect() plus a direct requests call — so this
+# feature can never AttributeError the page after a plain code redeploy.
+# ---------------------------------------------------------------------------
+def _completed_actions_conn(conn):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS completed_actions "
+        "(action_key TEXT PRIMARY KEY, done_at TEXT)"
+    )
+
+
+def _done_action_keys() -> set[str]:
+    try:
+        with db.connect() as conn:
+            _completed_actions_conn(conn)
+            rows = conn.execute("SELECT action_key FROM completed_actions").fetchall()
+        return {r["action_key"] for r in rows}
+    except Exception:
+        return set()
+
+
+def _mark_action_done(action_key: str) -> None:
+    with db.connect() as conn:
+        _completed_actions_conn(conn)
+        conn.execute(
+            "INSERT INTO completed_actions (action_key, done_at) VALUES (?, ?) "
+            "ON CONFLICT(action_key) DO UPDATE SET done_at=excluded.done_at",
+            (action_key, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def _set_local_task_completed(task_id: str) -> None:
+    with db.connect() as conn:
+        conn.execute("UPDATE tasks SET status='COMPLETED' WHERE id=?", (task_id,))
+
+
+def _complete_hubspot_task(token: str, task_id: str) -> None:
+    """PATCH a HubSpot task to COMPLETED. Raises on HTTP error (e.g. 403 = missing
+    the crm.objects.tasks.write scope)."""
+    resp = requests.patch(
+        f"https://api.hubapi.com/crm/v3/objects/tasks/{task_id}",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"properties": {"hs_task_status": "COMPLETED"}},
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+
 # ===========================================================================
 # 1) ⚡ DO THIS NOW — exception-based action queue
 # ===========================================================================
@@ -845,7 +898,7 @@ st.markdown("#### ⚡ Do This Now")
 _ACTION_CAP = 12
 
 # Hide actions the user has already checked off (completed / cleared).
-_done_keys = db.done_action_keys()
+_done_keys = _done_action_keys()
 actions = [a for a in actions if a.get("key") not in _done_keys]
 _hubspot_token = st.secrets.get("HUBSPOT_TOKEN", "")
 
@@ -885,8 +938,8 @@ else:
             # st.toast survives the rerun below, so the sync result stays visible.
             if a.get("type") == "task" and a.get("id") and _hubspot_token:
                 try:
-                    hubspot.complete_task(_hubspot_token, str(a["id"]))
-                    db.set_task_status(str(a["id"]), "COMPLETED")
+                    _complete_hubspot_task(_hubspot_token, str(a["id"]))
+                    _set_local_task_completed(str(a["id"]))
                     load_tasks.clear()
                     st.toast("Task marked Completed in HubSpot.", icon="✅")
                 except Exception as e:
@@ -895,7 +948,7 @@ else:
                         "Add the crm.objects.tasks.write scope to sync completion.",
                         icon="⚠️",
                     )
-            db.mark_action_done(a.get("key", a["title"]), db.now_iso())
+            _mark_action_done(a.get("key", a["title"]))
             st.rerun()
     if len(actions) > _ACTION_CAP:
         st.caption(f"+ {len(actions) - _ACTION_CAP} more lower-priority actions (re-engage / start-conversation) — see Hot Deals & Qualified Leads below.")

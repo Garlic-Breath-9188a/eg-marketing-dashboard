@@ -21,7 +21,10 @@ auto-redeploys within ~30s.
 
 ## Deploy notes
 
-- Changes to imported modules (`store/`, `ingest/`, `classify/`) need a full
-  Streamlit Cloud process restart, not just a rerun — a fresh `git push` (even an
-  empty commit) forces it.
+- **Streamlit Cloud caches imported modules.** A plain code push reruns `app.py`
+  from source but keeps `store/`, `ingest/`, `classify/` in memory — so newly-added
+  functions there can `AttributeError` until the *process* restarts. An empty commit
+  does NOT reliably force this. The reliable trigger is **changing `requirements.txt`**
+  (forces an environment rebuild + restart). For hot-path features, prefer keeping
+  the logic in `app.py` (always re-read fresh) over new module functions.
 - `git push` is pre-authorized via `.claude/settings.local.json`.
