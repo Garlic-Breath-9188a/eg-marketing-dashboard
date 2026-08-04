@@ -939,12 +939,17 @@ else:
             if a.get("type") == "task" and a.get("id") and _hubspot_token:
                 try:
                     _complete_hubspot_task(_hubspot_token, str(a["id"]))
-                    _set_local_task_completed(str(a["id"]))
-                    load_tasks.clear()
                     st.toast("Task marked Completed in HubSpot.", icon="✅")
+                    # Best-effort local reconcile so counts update before the next
+                    # refresh; its failure must NOT be reported as a HubSpot failure.
+                    try:
+                        _set_local_task_completed(str(a["id"]))
+                        load_tasks.clear()
+                    except Exception:
+                        pass
                 except Exception as e:
                     st.toast(
-                        f"Cleared here, but HubSpot sync failed ({e}). "
+                        f"Cleared here, but HubSpot completion failed ({e}). "
                         "Add the crm.objects.tasks.write scope to sync completion.",
                         icon="⚠️",
                     )
