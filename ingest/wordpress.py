@@ -28,6 +28,17 @@ import requests
 
 from store import db
 
+# Some hosts/WAFs serve a bot-challenge HTML page (HTTP 200) to unfamiliar clients
+# — especially from datacenter IPs like Streamlit Cloud. A real browser UA + an
+# explicit JSON Accept header clears the lighter rules; harmless otherwise.
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
+
 
 def _strip_html(text: str | None) -> str | None:
     """Strip tags and decode entities.
@@ -46,6 +57,7 @@ class WordPressClient:
     def __init__(self, base_url: str, app_password_basic_auth: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
+        self.session.headers.update(_BROWSER_HEADERS)
         if app_password_basic_auth:
             self.session.headers.update({"Authorization": f"Basic {app_password_basic_auth}"})
 
@@ -59,7 +71,17 @@ class WordPressClient:
                 # WordPress returns 400 when paging past the end
                 break
             resp.raise_for_status()
-            posts = resp.json()
+            try:
+                posts = resp.json()
+            except ValueError:
+                ct = resp.headers.get("content-type", "unknown")
+                snippet = " ".join((resp.text or "").split())[:200]
+                raise RuntimeError(
+                    f"WordPress REST returned non-JSON (HTTP {resp.status_code}, {ct}) "
+                    f"from {resp.url}. This is almost always a host/WAF challenge on "
+                    f"Streamlit Cloud's IP — the same request works from a normal "
+                    f"connection. Body starts: {snippet!r}"
+                )
             if not posts:
                 break
             for p in posts:
@@ -101,6 +123,7 @@ class JetpackStatsClient:
     def __init__(self, base_url: str, basic_auth: str | None):
         self.base = base_url.rstrip("/")
         self.session = requests.Session()
+        self.session.headers.update(_BROWSER_HEADERS)
         if basic_auth:
             self.session.headers.update({"Authorization": f"Basic {basic_auth}"})
         self._site_id: str | None = None
@@ -176,7 +199,11 @@ def refresh(secrets: dict, progress=None) -> dict:
         progress("WordPress posts", 0, 0)
 
     post_rows: list[dict] = []
-    for p in wp.iter_posts():
+    try:
+        _posts_iter = list(wp.iter_posts())
+    except Exception as e:
+        return {"posts": 0, "error": str(e)}
+    for p in _posts_iter:
         embedded = p.get("_embedded", {}) or {}
         author_obj = (embedded.get("author") or [{}])[0]
         terms = embedded.get("wp:term") or []
