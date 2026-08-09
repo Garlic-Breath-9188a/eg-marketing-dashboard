@@ -10,4 +10,4 @@ anthropic>=0.60,<1
 
 # Touch to force a full Streamlit Cloud environment rebuild + process restart
 # (a plain code push reruns the script but keeps imported modules cached in memory).
-# rebuild: 2026-08-06b (reload ingest/wordpress.py — posts via WordPress.com API)
+# rebuild: 2026-08-06c (reload ingest/wordpress.py — WordPress.com token stats path)

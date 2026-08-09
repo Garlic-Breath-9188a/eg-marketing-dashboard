@@ -190,6 +190,47 @@ class JetpackStatsClient:
         return self._views(self.ALL_TIME_DAYS)
 
 
+class WpcomStatsClient:
+    """View counts via the **WordPress.com API** with an OAuth token — the only
+    stats path reachable from Streamlit Cloud (the site's own /wp-json is behind
+    SiteGround's Anti-Bot AI). Stats are private, so this needs a WordPress.com
+    OAuth access token (scope `stats`) in secrets as WPCOM_API_TOKEN.
+    """
+
+    API = "https://public-api.wordpress.com/rest/v1.1"
+    ALL_TIME_DAYS = 3650
+    MAX_POSTS = 500
+
+    def __init__(self, site: str, token: str):
+        self.site = site
+        self.session = requests.Session()
+        self.session.headers.update(_BROWSER_HEADERS)
+        self.session.headers.update({"Authorization": f"Bearer {token}"})
+
+    def _views(self, days: int) -> dict:
+        url = f"{self.API}/sites/{self.site}/stats/top-posts"
+        try:
+            resp = self.session.get(
+                url, params={"num": days, "summarize": 1, "max": self.MAX_POSTS}, timeout=60,
+            )
+            resp.raise_for_status()
+            entries = (resp.json().get("summary") or {}).get("postviews") or []
+        except (requests.RequestException, ValueError):
+            return {}
+        result: dict[str, int] = {}
+        for entry in entries:
+            pid = str(entry.get("id") or "")
+            if pid and pid != "0":  # id 0 = Home/Archives pseudo-entry
+                result[pid] = int(entry.get("views") or 0)
+        return result
+
+    def top_posts(self, days: int = 30) -> dict:
+        return self._views(days)
+
+    def all_time_views(self) -> dict:
+        return self._views(self.ALL_TIME_DAYS)
+
+
 def _build_basic_auth(user: str | None, app_password: str | None) -> str | None:
     if not user or not app_password:
         return None
@@ -247,18 +288,30 @@ def refresh(secrets: dict, progress=None) -> dict:
             "fetched_at": fetched_at,
         })
 
-    # Pull Jetpack view counts through the site's own API. This needs only the
-    # WordPress app password already used above — see JetpackStatsClient.
-    if wp_basic:
+    # View counts. Prefer the WordPress.com API with an OAuth token (reachable from
+    # Streamlit Cloud); otherwise fall back to the site's own Jetpack endpoint via the
+    # app password — which only works from an un-blocked connection (SiteGround's
+    # Anti-Bot AI blocks Cloud), so it yields 0 there.
+    site = _site_from_base_url(base_url)
+    wpcom_token = secrets.get("WPCOM_API_TOKEN")
+    views_30d: dict = {}
+    views_all: dict = {}
+    if wpcom_token:
+        if progress:
+            progress("WordPress.com stats", 0, 0)
+        jp = WpcomStatsClient(site, wpcom_token)
+        views_30d = jp.top_posts(days=30)
+        views_all = jp.all_time_views()
+    elif wp_basic:
         if progress:
             progress("Jetpack stats", 0, 0)
         jp = JetpackStatsClient(base_url, wp_basic)
         views_30d = jp.top_posts(days=30)
         views_all = jp.all_time_views()
-        if views_30d or views_all:
-            for r in post_rows:
-                r["views_30d"] = views_30d.get(r["id"], 0)
-                r["views_all_time"] = views_all.get(r["id"], 0)
+    if views_30d or views_all:
+        for r in post_rows:
+            r["views_30d"] = views_30d.get(r["id"], 0)
+            r["views_all_time"] = views_all.get(r["id"], 0)
 
     db.upsert_wordpress_posts(post_rows)
     db.set_meta("last_wordpress_refresh", fetched_at)
