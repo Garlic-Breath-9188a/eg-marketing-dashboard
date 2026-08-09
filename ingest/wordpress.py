@@ -1,21 +1,23 @@
-"""WordPress / Jetpack ingest for WealthTechToday.com posts.
+"""WordPress ingest for WealthTechToday.com posts.
 
-Two data sources combined:
-1. **WordPress REST API** (`/wp-json/wp/v2/posts`) — post metadata: title, URL, date, categories, tags, author, excerpt.
-   Public for most WordPress sites; auth needed for drafts/private posts.
+**Post metadata** comes from the **WordPress.com public API** (v1.1,
+`public-api.wordpress.com/rest/v1.1/sites/<domain>/posts`), NOT the site's own
+`/wp-json`. The site is hosted on SiteGround, whose server-side Anti-Bot AI serves
+datacenter IPs (Streamlit Cloud's egress) an `sgcaptcha` HTML challenge that a
+headless client can't solve — so the site's own REST API is unreachable from Cloud
+(confirmed with SiteGround support 2026-08-06; no `/wp-json/` path exclusion is
+possible on their platform). The WordPress.com API is on WordPress.com's own infra,
+needs no auth for public posts, and isn't behind SiteGround.
 
-2. **Jetpack Stats via the site's own API** (`/wp-json/jetpack/v4/stats-app/…`) — view counts.
-   Jetpack proxies these to WordPress.com over the site's existing connection, so the
-   WordPress application password below is the only credential needed. No WordPress.com
-   OAuth app, no bearer token, nothing to expire.
+**View counts** (`JetpackStatsClient`) still call the site's own
+`/wp-json/jetpack/v4/stats-app/…`, which means they only populate from an
+un-blocked connection (e.g. local); on Streamlit Cloud they degrade to 0 because
+that domain is behind the same SiteGround block. Getting counts on Cloud requires
+a WordPress.com OAuth token (stats are private) — deferred until needed.
 
-Auth from `st.secrets`:
-  - `WORDPRESS_BASE_URL`        — e.g. "https://wealthtechtoday.com"
-  - `WORDPRESS_APP_PASSWORD`    — optional, for reading drafts; format "user:app-password" (base64-encoded in basic auth)
-  - `WORDPRESS_USER`            — username for app password
-
-`WPCOM_API_TOKEN` / `WPCOM_SITE` are no longer used — the site-proxied endpoint
-replaced them on 2026-07-22.
+Config from `st.secrets`:
+  - `WORDPRESS_BASE_URL`      — e.g. "https://wealthtechtoday.com" (domain → WP.com site id)
+  - `WORDPRESS_USER` / `WORDPRESS_APP_PASSWORD` — only used by the (local-only) stats path
 """
 from __future__ import annotations
 
@@ -53,42 +55,54 @@ def _strip_html(text: str | None) -> str | None:
     return html.unescape(re.sub(r"<[^>]+>", "", text)).strip() or None
 
 
+def _site_from_base_url(base_url: str) -> str:
+    """wealthtechtoday.com from https://wealthtechtoday.com/ — the WordPress.com API
+    accepts the bare domain as the site identifier."""
+    return base_url.split("://", 1)[-1].strip("/").split("/")[0]
+
+
 class WordPressClient:
-    def __init__(self, base_url: str, app_password_basic_auth: str | None = None):
-        self.base_url = base_url.rstrip("/")
+    """Reads published posts from the **WordPress.com public API** (v1.1), not the
+    site's own /wp-json. WealthTechToday is hosted on SiteGround, whose server-side
+    Anti-Bot AI serves datacenter IPs (Streamlit Cloud) an `sgcaptcha` HTML challenge
+    that a headless client can't solve — so the site's own REST API is unreachable
+    from Cloud. The WordPress.com API runs on WordPress.com's own infra (the site is
+    Jetpack-connected), needs no auth for public posts, and isn't behind SiteGround.
+    """
+
+    API = "https://public-api.wordpress.com/rest/v1.1"
+
+    def __init__(self, base_url: str):
+        self.site = _site_from_base_url(base_url)
         self.session = requests.Session()
         self.session.headers.update(_BROWSER_HEADERS)
-        if app_password_basic_auth:
-            self.session.headers.update({"Authorization": f"Basic {app_password_basic_auth}"})
 
     def iter_posts(self, per_page: int = 100, max_pages: int = 50) -> Iterator[dict]:
-        page = 1
-        while page <= max_pages:
-            url = f"{self.base_url}/wp-json/wp/v2/posts"
-            params = {"per_page": per_page, "page": page, "_embed": "true", "status": "publish"}
+        offset = 0
+        fetched = 0
+        for _ in range(max_pages):
+            url = f"{self.API}/sites/{self.site}/posts/"
+            params = {"number": per_page, "offset": offset, "status": "publish"}
             resp = self.session.get(url, params=params, timeout=30)
-            if resp.status_code == 400:
-                # WordPress returns 400 when paging past the end
-                break
             resp.raise_for_status()
             try:
-                posts = resp.json()
+                data = resp.json()
             except ValueError:
                 ct = resp.headers.get("content-type", "unknown")
                 snippet = " ".join((resp.text or "").split())[:200]
                 raise RuntimeError(
-                    f"WordPress REST returned non-JSON (HTTP {resp.status_code}, {ct}) "
-                    f"from {resp.url}. This is almost always a host/WAF challenge on "
-                    f"Streamlit Cloud's IP — the same request works from a normal "
-                    f"connection. Body starts: {snippet!r}"
+                    f"WordPress.com API returned non-JSON (HTTP {resp.status_code}, "
+                    f"{ct}) from {resp.url}. Body starts: {snippet!r}"
                 )
+            posts = data.get("posts") or []
             if not posts:
                 break
             for p in posts:
                 yield p
-            if len(posts) < per_page:
+            fetched += len(posts)
+            offset += len(posts)
+            if fetched >= int(data.get("found") or 0) or len(posts) < per_page:
                 break
-            page += 1
 
 
 class JetpackStatsClient:
@@ -193,7 +207,7 @@ def refresh(secrets: dict, progress=None) -> dict:
 
     fetched_at = db.now_iso()
     wp_basic = _build_basic_auth(secrets.get("WORDPRESS_USER"), secrets.get("WORDPRESS_APP_PASSWORD"))
-    wp = WordPressClient(base_url, wp_basic)
+    wp = WordPressClient(base_url)
 
     if progress:
         progress("WordPress posts", 0, 0)
@@ -204,32 +218,26 @@ def refresh(secrets: dict, progress=None) -> dict:
     except Exception as e:
         return {"posts": 0, "error": str(e)}
     for p in _posts_iter:
-        embedded = p.get("_embedded", {}) or {}
-        author_obj = (embedded.get("author") or [{}])[0]
-        terms = embedded.get("wp:term") or []
-        categories = []
-        tags = []
-        for term_group in terms:
-            for term in term_group:
-                if term.get("taxonomy") == "category":
-                    categories.append(term.get("name"))
-                elif term.get("taxonomy") == "post_tag":
-                    tags.append(term.get("name"))
+        # WordPress.com v1.1 shape: categories/tags are {name: {...}} dicts,
+        # author is an object, title/excerpt/content are HTML-escaped strings.
+        author = p.get("author") or {}
+        categories = list((p.get("categories") or {}).keys())
+        tags = list((p.get("tags") or {}).keys())
 
-        title = _strip_html((p.get("title") or {}).get("rendered"))
-        content = _strip_html((p.get("content") or {}).get("rendered")) or ""
-        excerpt = _strip_html((p.get("excerpt") or {}).get("rendered"))
+        title = _strip_html(p.get("title"))
+        content = _strip_html(p.get("content")) or ""
+        excerpt = _strip_html(p.get("excerpt"))
 
         post_rows.append({
-            "id": str(p.get("id")),
+            "id": str(p.get("ID")),
             "title": title,
             "slug": p.get("slug"),
-            "url": p.get("link"),
+            "url": p.get("URL"),
             "status": p.get("status"),
-            "published_at": p.get("date_gmt") or p.get("date"),
-            "modified_at": p.get("modified_gmt") or p.get("modified"),
-            "author_id": str(author_obj.get("id")) if author_obj.get("id") else None,
-            "author_name": author_obj.get("name"),
+            "published_at": p.get("date"),
+            "modified_at": p.get("modified"),
+            "author_id": str(author.get("ID")) if author.get("ID") else None,
+            "author_name": author.get("name"),
             "categories": ", ".join(c for c in categories if c) or None,
             "tags": ", ".join(t for t in tags if t) or None,
             "excerpt": (excerpt or "")[:500] if excerpt else None,
