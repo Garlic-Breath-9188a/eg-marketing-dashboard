@@ -25,6 +25,7 @@ import base64
 import json
 import time
 from typing import Iterator
+from urllib.parse import unquote
 
 import requests
 
@@ -203,9 +204,15 @@ class WpcomStatsClient:
 
     def __init__(self, site: str, token: str):
         self.site = site
+        raw = token or ""
+        # OAuth redirect fragments percent-encode special chars, so a token pasted
+        # straight from the URL can arrive still-encoded (e.g. %2F for /), which the
+        # API rejects as invalid. Decode + trim defensively.
+        self.token = unquote(raw.strip())
+        self._profile = f"len={len(self.token)} pct_in_raw={'%' in raw} space={' ' in raw.strip()}"
         self.session = requests.Session()
         self.session.headers.update(_BROWSER_HEADERS)
-        self.session.headers.update({"Authorization": f"Bearer {token}"})
+        self.session.headers.update({"Authorization": f"Bearer {self.token}"})
         self.last_note: str | None = None  # human-readable diagnostic for the UI
 
     def _views(self, days: int) -> dict:
@@ -218,8 +225,8 @@ class WpcomStatsClient:
             self.last_note = f"stats request failed: {e}"
             return {}
         if resp.status_code != 200:
-            snippet = " ".join((resp.text or "").split())[:160]
-            self.last_note = f"stats HTTP {resp.status_code}: {snippet}"
+            snippet = " ".join((resp.text or "").split())[:140]
+            self.last_note = f"stats HTTP {resp.status_code}: {snippet} [token {self._profile}]"
             return {}
         try:
             data = resp.json()
