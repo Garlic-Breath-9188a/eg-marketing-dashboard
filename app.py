@@ -274,6 +274,9 @@ def refresh_from_wordpress():
         st.error(result["error"])
     else:
         st.success(f"WordPress refreshed: {result.get('posts', 0)} posts.")
+        note = result.get("stats_note")
+        if note:
+            st.info(f"View counts: {note}")
 
 
 # ---------------------------------------------------------------------------

@@ -206,6 +206,7 @@ class WpcomStatsClient:
         self.session = requests.Session()
         self.session.headers.update(_BROWSER_HEADERS)
         self.session.headers.update({"Authorization": f"Bearer {token}"})
+        self.last_note: str | None = None  # human-readable diagnostic for the UI
 
     def _views(self, days: int) -> dict:
         url = f"{self.API}/sites/{self.site}/stats/top-posts"
@@ -213,15 +214,35 @@ class WpcomStatsClient:
             resp = self.session.get(
                 url, params={"num": days, "summarize": 1, "max": self.MAX_POSTS}, timeout=60,
             )
-            resp.raise_for_status()
-            entries = (resp.json().get("summary") or {}).get("postviews") or []
-        except (requests.RequestException, ValueError):
+        except requests.RequestException as e:
+            self.last_note = f"stats request failed: {e}"
             return {}
+        if resp.status_code != 200:
+            snippet = " ".join((resp.text or "").split())[:160]
+            self.last_note = f"stats HTTP {resp.status_code}: {snippet}"
+            return {}
+        try:
+            data = resp.json()
+        except ValueError:
+            self.last_note = "stats returned non-JSON"
+            return {}
+        # Two possible shapes: summarize=1 → summary.postviews; else days.*.postviews.
+        entries = (data.get("summary") or {}).get("postviews")
+        shape = "summary"
+        if entries is None:
+            shape = "days"
+            entries = []
+            for day in (data.get("days") or {}).values():
+                entries.extend((day or {}).get("postviews") or [])
         result: dict[str, int] = {}
-        for entry in entries:
+        for entry in entries or []:
             pid = str(entry.get("id") or "")
             if pid and pid != "0":  # id 0 = Home/Archives pseudo-entry
-                result[pid] = int(entry.get("views") or 0)
+                result[pid] = result.get(pid, 0) + int(entry.get("views") or 0)
+        self.last_note = (
+            f"stats ok ({shape}): {len(result)} posts"
+            if result else f"stats returned 200 but no post views (keys: {sorted(data.keys())[:6]})"
+        )
         return result
 
     def top_posts(self, days: int = 30) -> dict:
@@ -296,12 +317,14 @@ def refresh(secrets: dict, progress=None) -> dict:
     wpcom_token = secrets.get("WPCOM_API_TOKEN")
     views_30d: dict = {}
     views_all: dict = {}
+    stats_note: str | None = None
     if wpcom_token:
         if progress:
             progress("WordPress.com stats", 0, 0)
         jp = WpcomStatsClient(site, wpcom_token)
-        views_30d = jp.top_posts(days=30)
         views_all = jp.all_time_views()
+        views_30d = jp.top_posts(days=30)
+        stats_note = jp.last_note  # diagnostic from the all-time/30d calls
     elif wp_basic:
         if progress:
             progress("Jetpack stats", 0, 0)
@@ -315,4 +338,4 @@ def refresh(secrets: dict, progress=None) -> dict:
 
     db.upsert_wordpress_posts(post_rows)
     db.set_meta("last_wordpress_refresh", fetched_at)
-    return {"posts": len(post_rows)}
+    return {"posts": len(post_rows), "stats_note": stats_note}
