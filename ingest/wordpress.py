@@ -24,12 +24,33 @@ from __future__ import annotations
 import base64
 import json
 import time
+from pathlib import Path
 from typing import Iterator
 from urllib.parse import unquote
 
 import requests
 
 from store import db
+
+# Committed per-article view-count snapshot, refreshed out-of-band by
+# scripts/fetch_wp_views.py (which runs from an un-blocked connection with the app
+# password). This is the RELIABLE source on Streamlit Cloud — Cloud's IP can't reach
+# the live Jetpack endpoint (SiteGround block) and the WordPress.com OAuth path hits
+# account-permission walls ("user cannot view stats"). A committed file also survives
+# Cloud's ephemeral disk.
+_VIEWS_SNAPSHOT = Path(__file__).resolve().parent.parent / "data" / "wp_views.json"
+
+
+def _load_views_snapshot() -> dict:
+    try:
+        d = json.loads(_VIEWS_SNAPSHOT.read_text())
+    except Exception:
+        return {"views_30d": {}, "views_all": {}}
+
+    def _m(x):
+        return {str(k): int(v) for k, v in (x or {}).items()}
+
+    return {"views_30d": _m(d.get("views_30d")), "views_all": _m(d.get("views_all"))}
 
 # Some hosts/WAFs serve a bot-challenge HTML page (HTTP 200) to unfamiliar clients
 # — especially from datacenter IPs like Streamlit Cloud. A real browser UA + an
@@ -338,6 +359,14 @@ def refresh(secrets: dict, progress=None) -> dict:
         jp = JetpackStatsClient(base_url, wp_basic)
         views_30d = jp.top_posts(days=30)
         views_all = jp.all_time_views()
+    # Fall back to the committed snapshot when no live source produced counts — which
+    # is the normal case on Streamlit Cloud. This is what makes the Views columns work.
+    if not (views_30d or views_all):
+        snap = _load_views_snapshot()
+        views_30d, views_all = snap["views_30d"], snap["views_all"]
+        if views_30d or views_all:
+            stats_note = f"snapshot: {len(views_all)} articles (data/wp_views.json)"
+
     if views_30d or views_all:
         for r in post_rows:
             r["views_30d"] = views_30d.get(r["id"], 0)

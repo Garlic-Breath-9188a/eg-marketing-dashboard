@@ -10,4 +10,4 @@ anthropic>=0.60,<1
 
 # Touch to force a full Streamlit Cloud environment rebuild + process restart
 # (a plain code push reruns the script but keeps imported modules cached in memory).
-# rebuild: 2026-08-06e (decode WPCOM token from OAuth redirect + token fingerprint)
+# rebuild: 2026-08-06f (view counts from committed data/wp_views.json snapshot)
