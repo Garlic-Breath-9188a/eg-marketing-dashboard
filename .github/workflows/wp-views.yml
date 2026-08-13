@@ -1,0 +1,39 @@
+name: Refresh WordPress view counts
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wp-views
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "requests>=2.31,<3"
+      - name: Fetch view counts
+        env:
+          WORDPRESS_USER: ${{ secrets.WORDPRESS_USER }}
+          WORDPRESS_APP_PASSWORD: ${{ secrets.WORDPRESS_APP_PASSWORD }}
+        run: python scripts/fetch_wp_views.py
+      - name: Commit snapshot if it changed
+        run: |
+          if [ -n "$(git status --porcelain data/wp_views.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/wp_views.json
+            git commit -m "chore: refresh WordPress view counts"
+            git push
+          else
+            echo "No change — nothing to commit."
+          fi
