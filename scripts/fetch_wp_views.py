@@ -46,11 +46,24 @@ def _views(days: int, auth: str) -> dict:
     return out
 
 
+def _from_secrets_toml(key: str) -> str | None:
+    """Fallback: read a value from .streamlit/secrets.toml so the script runs on a
+    machine (e.g. the Mac mini) without needing env vars set."""
+    path = Path(__file__).resolve().parent.parent / ".streamlit" / "secrets.toml"
+    try:
+        for line in path.read_text().splitlines():
+            if line.strip().startswith(key):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        return None
+    return None
+
+
 def main() -> None:
-    user = os.environ.get("WORDPRESS_USER")
-    app_pw = os.environ.get("WORDPRESS_APP_PASSWORD")
+    user = os.environ.get("WORDPRESS_USER") or _from_secrets_toml("WORDPRESS_USER")
+    app_pw = os.environ.get("WORDPRESS_APP_PASSWORD") or _from_secrets_toml("WORDPRESS_APP_PASSWORD")
     if not (user and app_pw):
-        sys.exit("Set WORDPRESS_USER and WORDPRESS_APP_PASSWORD in the environment.")
+        sys.exit("Set WORDPRESS_USER and WORDPRESS_APP_PASSWORD (env vars or .streamlit/secrets.toml).")
     auth = base64.b64encode(f"{user}:{app_pw}".encode()).decode()
     data = {
         "source": "jetpack stats-app via app password",
