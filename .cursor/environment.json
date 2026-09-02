@@ -1,0 +1,14 @@
+{
+  "name": "EG Marketing Dashboard",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "streamlit",
+      "command": "bash .cursor/run.sh"
+    }
+  ],
+  "ports": [
+    8501
+  ]
+}
