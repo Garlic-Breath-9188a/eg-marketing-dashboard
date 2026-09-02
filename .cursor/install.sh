@@ -9,9 +9,17 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   PYTHON_BIN="python3"
 fi
 
-# Create the venv once; reuse it on subsequent installs.
+# Create the venv once; reuse it on subsequent installs. The base image may not
+# ship the matching python venv module (Debian/Ubuntu splits it into a separate
+# package), so install it on demand if venv creation fails.
 if [ ! -x ".venv/bin/python" ]; then
-  "$PYTHON_BIN" -m venv .venv
+  if ! "$PYTHON_BIN" -m venv .venv 2>/dev/null; then
+    echo "venv module missing — installing it via apt..."
+    rm -rf .venv
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq "${PYTHON_BIN}-venv" || sudo apt-get install -y -qq python3-venv
+    "$PYTHON_BIN" -m venv .venv
+  fi
 fi
 
 # shellcheck disable=SC1091
