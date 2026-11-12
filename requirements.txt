@@ -13,4 +13,4 @@ google-genai>=1,<4
 
 # Touch to force a full Streamlit Cloud environment rebuild + process restart
 # (a plain code push reruns the script but keeps imported modules cached in memory).
-# rebuild: 2026-11-12b (Fathom classifier: support Gemini as well as Anthropic)
+# rebuild: 2026-11-12c (Gemini: current default model + fallback/retry)
