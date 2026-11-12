@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ingest import asana, authoredup, hubspot, outlook, slack, wordpress
+from ingest import asana, authoredup, fathom, hubspot, outlook, slack, wordpress
 from store import db
 
 
@@ -63,6 +63,17 @@ SOURCES: list[SourceSpec] = [
         "WordPress", "last_wordpress_refresh",
         lambda s, p: wordpress.refresh(dict(s), progress=p),
         ("WORDPRESS_BASE_URL",),
+    ),
+    # Fathom prospect-call follow-up tracking. refresh() pulls + Claude-classifies
+    # calls into prospect_calls; detect_followups() then scans Outlook Sent Items
+    # to auto-clear any that have since been emailed. The Sent Items scan needs
+    # MS Graph creds but degrades to a clean skip without them (calls are still
+    # tracked, they just can't auto-clear), so only the classify step's keys are
+    # hard requirements here.
+    SourceSpec(
+        "Fathom", "last_fathom_refresh",
+        lambda s, p: {**fathom.refresh(s, p), **fathom.detect_followups(s, p)},
+        ("FATHOM_API_KEY", "ANTHROPIC_API_KEY"),
     ),
 ]
 

@@ -279,6 +279,14 @@ def detect_followups(secrets, progress=None) -> dict:
     """
     from ingest import outlook  # local import: only needed when MS Graph is set up
 
+    # The Sent Items scan needs Microsoft Graph credentials. When they're absent,
+    # prospect calls are still tracked (classified by refresh()); they simply
+    # can't auto-clear, so degrade to a clean skip rather than a KeyError that
+    # would mark the whole Fathom refresh as failed.
+    ms_keys = ("MS_CLIENT_ID", "MS_TENANT_ID", "MS_CLIENT_SECRET", "MS_REFRESH_TOKEN")
+    if any(not secrets.get(k) for k in ms_keys):
+        return {"checked": 0, "matched": 0, "skipped": "Outlook not configured"}
+
     with db.connect() as conn:
         open_calls = conn.execute(
             "SELECT recording_id, call_at, attendees_json FROM prospect_calls "

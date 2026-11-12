@@ -279,6 +279,29 @@ def refresh_from_wordpress():
             st.info(f"View counts: {note}")
 
 
+def refresh_from_fathom():
+    """Refresh just prospect-call follow-ups (Fathom classify + Sent Items scan).
+
+    Runs through the shared orchestrator with names={"Fathom"} so the same
+    secret-gating and graceful-skip rules apply as in a full refresh.
+    """
+    if not st.secrets.get("FATHOM_API_KEY") or not st.secrets.get("ANTHROPIC_API_KEY"):
+        st.error("Fathom needs FATHOM_API_KEY and ANTHROPIC_API_KEY in secrets.")
+        return
+    status = st.empty()
+    report = refresh_all.refresh_all(
+        dict(st.secrets),
+        progress=lambda m: status.text(m),
+        only_stale=False,
+        names={"Fathom"},
+    )
+    status.empty()
+    if report.failed:
+        st.warning(report.summary())
+    else:
+        st.success(report.summary())
+
+
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
@@ -291,6 +314,7 @@ with st.sidebar:
         ("Asana", "last_asana_refresh"),
         ("Slack", "last_slack_refresh"),
         ("Outlook", "last_outlook_refresh"),
+        ("Fathom", "last_fathom_refresh"),
         ("LinkedIn", "last_linkedin_refresh"),
         ("WordPress", "last_wordpress_refresh"),
     ):
@@ -312,6 +336,8 @@ with st.sidebar:
             refresh_from_authoredup()
         if st.button("WordPress"):
             refresh_from_wordpress()
+        if st.button("Fathom"):
+            refresh_from_fathom()
 
     st.markdown("---")
     st.markdown("### Date range")
