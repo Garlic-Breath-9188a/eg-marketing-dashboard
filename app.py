@@ -291,6 +291,7 @@ with st.sidebar:
         ("Asana", "last_asana_refresh"),
         ("Slack", "last_slack_refresh"),
         ("Outlook", "last_outlook_refresh"),
+        ("Fathom", "last_fathom_refresh"),
         ("LinkedIn", "last_linkedin_refresh"),
         ("WordPress", "last_wordpress_refresh"),
     ):
