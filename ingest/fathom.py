@@ -25,11 +25,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
-import anthropic
 import requests
 
 from classify import companies as companies_cls
 from store import db
+
+# LLM SDKs (anthropic, google-genai) are imported lazily inside their provider
+# classes so the module loads even if only one provider's package is present.
 
 BASE = "https://api.fathom.ai/external/v1"
 
@@ -50,7 +52,10 @@ INTERNAL_DOMAINS = set(companies_cls.EXCLUDED_COMPANY_DOMAINS)
 # rather than an empty table.
 BACKFILL_DAYS = 90
 
+# Default models per provider. Either is overridable via a secret
+# (ANTHROPIC_MODEL / GEMINI_MODEL) without a code change.
 MODEL = "claude-opus-4-8"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 # Transcripts run long; this keeps a single classification bounded. The decision
 # is almost always evident early, and the tail of a call is usually scheduling.
@@ -107,6 +112,17 @@ _SCHEMA = {
     },
     "required": ["is_prospect", "company_name", "reason"],
     "additionalProperties": False,
+}
+
+# Gemini uses an OpenAPI-subset schema and rejects `additionalProperties`.
+_GEMINI_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_prospect": {"type": "boolean"},
+        "company_name": {"type": "string"},
+        "reason": {"type": "string"},
+    },
+    "required": ["is_prospect", "company_name", "reason"],
 }
 
 
@@ -224,9 +240,109 @@ def _transcript_text(meeting: dict) -> str:
     return "\n".join(lines)[:MAX_TRANSCRIPT_CHARS]
 
 
-def classify(client: anthropic.Anthropic, title: str, attendees: list[dict],
-             transcript: str) -> dict | None:
-    """Return {is_prospect, company_name, reason}, or None if unclassifiable."""
+def _coerce_verdict(data: dict | None) -> dict | None:
+    """Normalise a raw model response into the verdict shape, or None."""
+    if not isinstance(data, dict) or "is_prospect" not in data:
+        return None
+    return {
+        "is_prospect": bool(data.get("is_prospect")),
+        "company_name": (str(data.get("company_name") or "")).strip(),
+        "reason": (str(data.get("reason") or "")).strip(),
+    }
+
+
+class _AnthropicClassifier:
+    """Claude-backed classifier (requires the `anthropic` package + ANTHROPIC_API_KEY)."""
+
+    name = "anthropic"
+
+    def __init__(self, api_key: str, model: str):
+        import anthropic  # lazy: only needed when Anthropic is the chosen provider
+
+        self._client = anthropic.Anthropic(api_key=api_key)
+        self._model = model
+
+    def classify_json(self, system: str, user: str) -> dict | None:
+        response = self._client.messages.create(
+            model=self._model,
+            max_tokens=2000,
+            thinking={"type": "adaptive"},
+            output_config={
+                "effort": "low",
+                "format": {"type": "json_schema", "schema": _SCHEMA},
+            },
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        if getattr(response, "stop_reason", None) == "refusal":
+            return None
+        for block in response.content:
+            if block.type == "text":
+                try:
+                    return _coerce_verdict(json.loads(block.text))
+                except json.JSONDecodeError:
+                    return None
+        return None
+
+
+class _GeminiClassifier:
+    """Gemini-backed classifier (requires `google-genai` + GEMINI_API_KEY/GOOGLE_API_KEY).
+
+    Uses JSON response mode so the reply is raw JSON (no markdown fences). The
+    fields are specified in the shared rules prompt and validated on parse.
+    """
+
+    name = "gemini"
+
+    def __init__(self, api_key: str, model: str):
+        from google import genai  # lazy: only needed when Gemini is the chosen provider
+
+        self._client = genai.Client(api_key=api_key)
+        self._model = model
+
+    def classify_json(self, system: str, user: str) -> dict | None:
+        from google.genai import types
+
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=user,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                response_mime_type="application/json",
+                response_schema=_GEMINI_SCHEMA,
+                temperature=0,
+            ),
+        )
+        text = getattr(response, "text", None)
+        if not text:
+            return None
+        try:
+            return _coerce_verdict(json.loads(text))
+        except json.JSONDecodeError:
+            return None
+
+
+def build_classifier(secrets):
+    """Return a classifier for whichever LLM provider is configured, else None.
+
+    Gemini is preferred when its key is present (so an org with both configured
+    gets the cheaper default), falling back to Anthropic.
+    """
+    gemini_key = secrets.get("GEMINI_API_KEY") or secrets.get("GOOGLE_API_KEY")
+    if gemini_key:
+        return _GeminiClassifier(gemini_key, secrets.get("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL)
+    anthropic_key = secrets.get("ANTHROPIC_API_KEY")
+    if anthropic_key:
+        return _AnthropicClassifier(anthropic_key, secrets.get("ANTHROPIC_MODEL") or MODEL)
+    return None
+
+
+def classify(llm, title: str, attendees: list[dict], transcript: str) -> dict | None:
+    """Return {is_prospect, company_name, reason}, or None if unclassifiable.
+
+    `llm` is any provider classifier from `build_classifier` — the prompt, the
+    short-transcript guard, and parsing are shared; only the API call differs.
+    """
     if not transcript or len(transcript) < 100:
         # Too short to judge. Better to leave unclassified than to guess — an
         # unclassified call is visible as a gap; a wrong one silently misleads.
@@ -236,34 +352,12 @@ def classify(client: anthropic.Anthropic, title: str, attendees: list[dict],
         f"{a['name']} <{a['email']}>" if a["name"] else a["email"] for a in attendees
     ) or "none recorded"
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=2000,
-        thinking={"type": "adaptive"},
-        output_config={
-            "effort": "low",
-            "format": {"type": "json_schema", "schema": _SCHEMA},
-        },
-        system=_RULES,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Meeting title: {title}\n"
-                f"External attendees: {attendee_list}\n\n"
-                f"Transcript:\n{transcript}"
-            ),
-        }],
+    user = (
+        f"Meeting title: {title}\n"
+        f"External attendees: {attendee_list}\n\n"
+        f"Transcript:\n{transcript}"
     )
-
-    if response.stop_reason == "refusal":
-        return None
-    for block in response.content:
-        if block.type == "text":
-            try:
-                return json.loads(block.text)
-            except json.JSONDecodeError:
-                return None
-    return None
+    return llm.classify_json(_RULES, user)
 
 
 def detect_followups(secrets, progress=None) -> dict:
@@ -352,7 +446,12 @@ def _parse_iso(value: str | None) -> datetime | None:
 def refresh(secrets, progress=None, *, days: int | None = None) -> dict:
     """Pull recent Fathom calls, classify unseen ones, store them."""
     fathom = FathomClient(secrets["FATHOM_API_KEY"])
-    claude = anthropic.Anthropic(api_key=secrets["ANTHROPIC_API_KEY"])
+    llm = build_classifier(secrets)
+    if llm is None:
+        raise RuntimeError(
+            "No LLM API key configured for call classification "
+            "(set GEMINI_API_KEY or ANTHROPIC_API_KEY)."
+        )
     fetched_at = db.now_iso()
 
     window = days if days is not None else BACKFILL_DAYS
@@ -406,7 +505,7 @@ def refresh(secrets, progress=None, *, days: int | None = None) -> dict:
         if progress:
             progress(f"Fathom: classifying “{title[:48]}”…")
 
-        verdict = classify(claude, title, attendees, _transcript_text(meeting))
+        verdict = classify(llm, title, attendees, _transcript_text(meeting))
         if verdict is None:
             unclassifiable += 1
             continue

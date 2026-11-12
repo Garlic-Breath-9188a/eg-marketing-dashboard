@@ -29,8 +29,11 @@ class SourceSpec:
     meta_key: str
     # (secrets, progress) -> dict of counts
     run: object
-    # Secret keys that must be present, else the source is skipped as unconfigured.
+    # Secret keys that must ALL be present, else the source is skipped as unconfigured.
     requires: tuple[str, ...] = ()
+    # Secret keys where AT LEAST ONE must be present (e.g. any of several
+    # interchangeable LLM providers). Empty means no such requirement.
+    requires_any: tuple[str, ...] = ()
 
 
 SOURCES: list[SourceSpec] = [
@@ -64,16 +67,17 @@ SOURCES: list[SourceSpec] = [
         lambda s, p: wordpress.refresh(dict(s), progress=p),
         ("WORDPRESS_BASE_URL",),
     ),
-    # Fathom prospect-call follow-up tracking. refresh() pulls + Claude-classifies
+    # Fathom prospect-call follow-up tracking. refresh() pulls + LLM-classifies
     # calls into prospect_calls; detect_followups() then scans Outlook Sent Items
     # to auto-clear any that have since been emailed. The Sent Items scan needs
     # MS Graph creds but degrades to a clean skip without them (calls are still
-    # tracked, they just can't auto-clear), so only the classify step's keys are
-    # hard requirements here.
+    # tracked, they just can't auto-clear). Classification needs the Fathom key
+    # plus ANY one LLM provider key (Gemini or Anthropic).
     SourceSpec(
         "Fathom", "last_fathom_refresh",
         lambda s, p: {**fathom.refresh(s, p), **fathom.detect_followups(s, p)},
-        ("FATHOM_API_KEY", "ANTHROPIC_API_KEY"),
+        requires=("FATHOM_API_KEY",),
+        requires_any=("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY"),
     ),
 ]
 
@@ -128,7 +132,11 @@ def refresh_all(
     for spec in SOURCES:
         if names is not None and spec.name not in names:
             continue
-        if any(not secrets.get(k) for k in spec.requires):
+        missing_required = any(not secrets.get(k) for k in spec.requires)
+        missing_any = bool(spec.requires_any) and not any(
+            secrets.get(k) for k in spec.requires_any
+        )
+        if missing_required or missing_any:
             report.skipped_unconfigured.append(spec.name)
             continue
 

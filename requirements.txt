@@ -7,7 +7,10 @@ pandas>=3.0,<4
 plotly>=6.0,<7
 python-dateutil>=2.9,<3
 anthropic>=0.60,<1
+# Fathom call classifier can use either provider; whichever key is set wins.
+# google-genai verified working on 3.3.0 (Python 3.12).
+google-genai>=1,<4
 
 # Touch to force a full Streamlit Cloud environment rebuild + process restart
 # (a plain code push reruns the script but keeps imported modules cached in memory).
-# rebuild: 2026-11-12a (wire Fathom follow-up tracking into refresh_all)
+# rebuild: 2026-11-12b (Fathom classifier: support Gemini as well as Anthropic)
