@@ -285,8 +285,16 @@ def refresh_from_fathom():
     Runs through the shared orchestrator with names={"Fathom"} so the same
     secret-gating and graceful-skip rules apply as in a full refresh.
     """
-    if not st.secrets.get("FATHOM_API_KEY") or not st.secrets.get("ANTHROPIC_API_KEY"):
-        st.error("Fathom needs FATHOM_API_KEY and ANTHROPIC_API_KEY in secrets.")
+    _llm_key = (
+        st.secrets.get("GEMINI_API_KEY")
+        or st.secrets.get("GOOGLE_API_KEY")
+        or st.secrets.get("ANTHROPIC_API_KEY")
+    )
+    if not st.secrets.get("FATHOM_API_KEY") or not _llm_key:
+        st.error(
+            "Fathom needs FATHOM_API_KEY plus an LLM key "
+            "(GEMINI_API_KEY or ANTHROPIC_API_KEY) in secrets."
+        )
         return
     status = st.empty()
     report = refresh_all.refresh_all(
