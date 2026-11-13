@@ -55,7 +55,13 @@ BACKFILL_DAYS = 90
 # Default models per provider. Either is overridable via a secret
 # (ANTHROPIC_MODEL / GEMINI_MODEL) without a code change.
 MODEL = "claude-opus-4-8"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+
+# Google rotates which model a given key may call (older ones get retired and
+# marked "no longer available to new users") and sometimes overloads the newest
+# flash model (503/504). This ordered fallback is tried after the configured
+# default so a single retired or busy model never fails the whole refresh.
+_GEMINI_FALLBACK_MODELS = ("gemini-3.8-flash", "gemini-3.5-flash")
 
 # Transcripts run long; this keeps a single classification bounded. The decision
 # is almost always evident early, and the tail of a call is usually scheduling.
@@ -294,32 +300,66 @@ class _GeminiClassifier:
 
     name = "gemini"
 
+    # Error-string fragments that mean "this specific model won't work — try
+    # another" vs. "transient, retry the same model".
+    _MODEL_DEAD = ("404", "NOT_FOUND", "not found", "no longer available", "not supported")
+    _TRANSIENT = ("503", "UNAVAILABLE", "504", "DEADLINE", "429", "RESOURCE_EXHAUSTED")
+
     def __init__(self, api_key: str, model: str):
         from google import genai  # lazy: only needed when Gemini is the chosen provider
-
-        self._client = genai.Client(api_key=api_key)
-        self._model = model
-
-    def classify_json(self, system: str, user: str) -> dict | None:
         from google.genai import types
 
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=user,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                response_mime_type="application/json",
-                response_schema=_GEMINI_SCHEMA,
-                temperature=0,
-            ),
+        self._types = types
+        # Bound each request so an overloaded model can't hang the refresh.
+        self._client = genai.Client(
+            api_key=api_key, http_options=types.HttpOptions(timeout=45_000)
         )
-        text = getattr(response, "text", None)
-        if not text:
-            return None
-        try:
-            return _coerce_verdict(json.loads(text))
-        except json.JSONDecodeError:
-            return None
+        # Try the configured/default model first, then known-good fallbacks.
+        candidates: list[str] = []
+        for m in (model, *_GEMINI_FALLBACK_MODELS):
+            if m and m not in candidates:
+                candidates.append(m)
+        self._candidates = candidates
+        self._model = candidates[0]
+
+    def classify_json(self, system: str, user: str) -> dict | None:
+        types = self._types
+        config = types.GenerateContentConfig(
+            system_instruction=system,
+            response_mime_type="application/json",
+            response_schema=_GEMINI_SCHEMA,
+            temperature=0,
+        )
+        last_err: Exception | None = None
+        for model in list(self._candidates):
+            for attempt in range(3):
+                try:
+                    response = self._client.models.generate_content(
+                        model=model, contents=user, config=config
+                    )
+                except Exception as e:  # provider raises several error types
+                    last_err = e
+                    msg = str(e)
+                    if any(frag in msg for frag in self._TRANSIENT):
+                        time.sleep(2 * (attempt + 1))  # busy/slow: brief backoff, retry
+                        continue
+                    if any(frag in msg for frag in self._MODEL_DEAD):
+                        break  # model unusable for this key — fall through to next
+                    raise  # genuine error (auth, bad request): surface it
+                # Success — remember the model that answered so the rest of the
+                # refresh skips straight to it.
+                self._model = model
+                self._candidates = [model] + [m for m in self._candidates if m != model]
+                text = getattr(response, "text", None)
+                if not text:
+                    return None
+                try:
+                    return _coerce_verdict(json.loads(text))
+                except json.JSONDecodeError:
+                    return None
+        if last_err is not None:
+            raise last_err
+        return None
 
 
 def build_classifier(secrets):
