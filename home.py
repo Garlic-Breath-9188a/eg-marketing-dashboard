@@ -1,0 +1,1426 @@
+"""Sales Dashboard — deal-focused overview page."""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+import plotly.graph_objects as go
+import requests
+import streamlit as st
+
+from classify import companies as _companies
+from classify import pipeline
+from classify import qualified as _qualified
+from classify.leads import LEAD_CATEGORIES, classify_dataframe
+from ingest import authoredup, hubspot, refresh_all, wordpress
+from store import db
+
+# Compact density: shrink metric font, tighten vertical spacing.
+st.markdown(
+    """
+    <style>
+      .block-container { padding-top: 3rem; padding-bottom: 1rem; }
+      [data-testid="stMetricValue"] { font-size: 1.4rem; }
+      [data-testid="stMetricLabel"] { font-size: 0.8rem; }
+      [data-testid="stMetricDelta"] { font-size: 0.75rem; }
+      h1 { font-size: 1.6rem !important; padding-top: 0.5rem !important; margin-bottom: 0.5rem !important; line-height: 1.3 !important; }
+      h2 { font-size: 1.15rem !important; padding-top: 0.5rem !important; }
+      h3 { font-size: 1rem !important; }
+      h4 { font-size: 0.95rem !important; padding-top: 0.4rem !important; margin-bottom: 0.3rem !important; }
+      hr { margin: 0.5rem 0 !important; }
+      div[data-testid="stHorizontalBlock"] { gap: 0.5rem; }
+
+      /* Executive overview KPI cards (reference-style) */
+      .kpi-card {
+        background: #ffffff; border: 1px solid #ecedf3; border-radius: 12px;
+        padding: 0.85rem 1rem 0.75rem; box-shadow: 0 1px 2px rgba(16,24,40,0.05);
+        height: 100%; min-height: 108px;
+      }
+      .kpi-label {
+        font-size: 0.72rem; color: #667085; font-weight: 600; line-height: 1.2;
+        margin-bottom: 0.4rem; min-height: 1.9em;
+      }
+      .kpi-value { font-size: 1.7rem; font-weight: 800; line-height: 1.05; letter-spacing: -0.5px; }
+      .kpi-delta { font-size: 0.72rem; font-weight: 600; margin-top: 0.35rem; }
+      .kpi-delta-muted { color: #98a2b3; }
+      .pipe-head { font-size: 0.98rem; font-weight: 700; color: #1d2433; margin: 0.2rem 0 0.1rem; }
+      .pipe-sub { font-size: 0.75rem; color: #667085; margin-bottom: 0.1rem; }
+      .section-title { font-size: 1.15rem; font-weight: 700; color: #1d2433; margin: 0.6rem 0 0.3rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# Auth and first-run bootstrap run in the app.py router before this page loads.
+if not st.session_state.get("authed"):
+    st.warning("Sign in on the main page first.")
+    st.stop()
+
+db.init_db()
+
+
+# ---------------------------------------------------------------------------
+# Data load
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=3600)
+def load_contacts() -> pd.DataFrame:
+    db.init_db()
+    with db.connect() as conn:
+        df = pd.read_sql("SELECT * FROM contacts", conn)
+    if "createdate" in df.columns:
+        df["createdate"] = pd.to_datetime(df["createdate"], errors="coerce", utc=True)
+    # Ensure newer columns exist even if cached load predates the migration
+    for col in ("hubspot_url", "num_associated_deals", "notes_last_contacted",
+                "hs_email_last_open_date", "hs_email_last_click_date",
+                "hubspot_owner_id", "hs_lead_status"):
+        if col not in df.columns:
+            df[col] = None
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_companies() -> pd.DataFrame:
+    db.init_db()
+    with db.connect() as conn:
+        return pd.read_sql("SELECT * FROM companies", conn)
+
+
+@st.cache_data(ttl=3600)
+def load_forms() -> pd.DataFrame:
+    db.init_db()
+    with db.connect() as conn:
+        return pd.read_sql("SELECT * FROM forms", conn)
+
+
+@st.cache_data(ttl=3600)
+def load_form_submissions() -> pd.DataFrame:
+    db.init_db()
+    with db.connect() as conn:
+        df = pd.read_sql("SELECT * FROM form_submissions", conn)
+    if "submitted_at" in df.columns:
+        df["submitted_at"] = pd.to_datetime(df["submitted_at"], errors="coerce", utc=True)
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_linkedin_posts() -> pd.DataFrame:
+    db.init_db()
+    with db.connect() as conn:
+        df = pd.read_sql("SELECT * FROM linkedin_posts", conn)
+    if "published_at" in df.columns:
+        df["published_at"] = pd.to_datetime(df["published_at"], errors="coerce", utc=True)
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_deals() -> pd.DataFrame:
+    db.init_db()
+    with db.connect() as conn:
+        try:
+            df = pd.read_sql("SELECT * FROM deals", conn)
+        except Exception:
+            return pd.DataFrame()
+    for col in ("closedate", "createdate"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+    # Ensure stage-metadata columns exist even if cached load predates the migration.
+    for col in ("stage_is_closed", "stage_is_won", "stage_label"):
+        if col not in df.columns:
+            df[col] = None
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_tasks() -> pd.DataFrame:
+    db.init_db()
+    with db.connect() as conn:
+        try:
+            df = pd.read_sql("SELECT * FROM tasks", conn)
+        except Exception:
+            return pd.DataFrame()
+    for col in ("due_at", "completed_at"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_deal_pipelines() -> list[dict]:
+    """Pipeline + stage names/order used to label the funnels.
+
+    Prefer the copy persisted at ingest (store.meta `deal_pipelines`). If it is
+    missing — e.g. the cache predates the pipelines ingest, which is exactly why
+    the funnels rendered raw pipeline IDs like `877448091` — fetch it directly
+    from HubSpot (one cheap call) and persist it, so the names appear without
+    waiting for a full "Refresh everything". Degrades to [] with no token/data.
+    """
+    raw = db.get_meta("deal_pipelines")
+    if raw:
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            pass
+    token = st.secrets.get("HUBSPOT_TOKEN", "")
+    if not token:
+        return []
+    try:
+        pipelines = hubspot.HubSpotClient(token).get_deal_pipelines()
+    except Exception:
+        return []
+    if pipelines:
+        db.set_meta("deal_pipelines", json.dumps(pipelines))
+    return pipelines
+
+
+def refresh_from_hubspot():
+    token = st.secrets.get("HUBSPOT_TOKEN", "")
+    if not token:
+        st.error("HUBSPOT_TOKEN not configured in secrets.toml.")
+        return
+    status = st.empty()
+    bar = st.progress(0.0)
+
+    def _progress(stage, current, total):
+        status.text(f"{stage}… ({current}/{total})" if total else f"{stage}…")
+        bar.progress(min(1.0, current / total) if total else 0.0)
+
+    result = hubspot.refresh(token, progress=_progress)
+    status.empty()
+    bar.empty()
+    deals_n = result.get("deals", 0)
+    tasks_n = result.get("tasks", 0)
+    extra = ""
+    if deals_n or tasks_n:
+        extra = f", {deals_n} deals, {tasks_n} tasks"
+    else:
+        extra = " (deals/tasks: 0 — add crm.objects.deals.read scope to Service Key to enable)"
+    st.success(
+        f"Refreshed: {result['contacts']} contacts, {result['companies']} companies, "
+        f"{result['forms']} forms, {result['submissions']} submissions{extra}."
+    )
+    load_contacts.clear()
+    load_companies.clear()
+    load_forms.clear()
+    load_form_submissions.clear()
+    load_linkedin_posts.clear()
+    load_deals.clear()
+    load_tasks.clear()
+
+
+def _clear_all_caches() -> None:
+    for loader in (load_contacts, load_companies, load_forms, load_form_submissions,
+                   load_linkedin_posts, load_deals, load_tasks, load_deal_pipelines):
+        loader.clear()
+
+
+def run_full_refresh(force: bool = False) -> None:
+    """Refresh every source through the shared orchestrator.
+
+    Same code path as `scripts/refresh_all.py`, which the daily launchd job
+    runs — one definition of "refresh everything", so the button and the
+    schedule cannot drift apart.
+    """
+    status = st.empty()
+    report = refresh_all.refresh_all(
+        dict(st.secrets),
+        progress=lambda m: status.text(m),
+        only_stale=not force,
+    )
+    status.empty()
+    _clear_all_caches()
+
+    if report.failed:
+        st.warning(report.summary())
+    elif report.did_anything:
+        st.success(report.summary())
+    else:
+        st.info(report.summary())
+
+
+def refresh_from_authoredup():
+    api_key = st.secrets.get("AUTHOREDUP_API_KEY", "")
+    if not api_key:
+        st.error("AUTHOREDUP_API_KEY not configured in secrets.toml.")
+        return
+    status = st.empty()
+
+    def _progress(stage, current, total):
+        status.text(f"{stage}…")
+
+    try:
+        result = authoredup.refresh(api_key, progress=_progress)
+    except Exception as e:
+        status.empty()
+        st.error(f"AuthoredUp refresh failed: {e}")
+        return
+    status.empty()
+    st.success(f"AuthoredUp refreshed: {result['actors']} actors, {result['posts']} posts.")
+    load_linkedin_posts.clear()
+
+
+def refresh_from_wordpress():
+    base_url = st.secrets.get("WORDPRESS_BASE_URL", "")
+    if not base_url:
+        st.error(
+            "WORDPRESS_BASE_URL not configured in secrets. "
+            "Add WORDPRESS_BASE_URL, WORDPRESS_USER and WORDPRESS_APP_PASSWORD to `.streamlit/secrets.toml`. "
+            "View counts come through the same app password — no extra token needed."
+        )
+        return
+    status = st.empty()
+
+    def _progress(stage, current, total):
+        status.text(f"{stage}…")
+
+    try:
+        result = wordpress.refresh(dict(st.secrets), progress=_progress)
+    except Exception as e:
+        status.empty()
+        st.error(f"WordPress refresh failed: {e}")
+        return
+    status.empty()
+    if result.get("error"):
+        st.error(result["error"])
+    else:
+        st.success(f"WordPress refreshed: {result.get('posts', 0)} posts.")
+        note = result.get("stats_note")
+        if note:
+            st.info(f"View counts: {note}")
+
+
+def refresh_from_fathom():
+    """Refresh just prospect-call follow-ups (Fathom classify + Sent Items scan).
+
+    Runs through the shared orchestrator with names={"Fathom"} so the same
+    secret-gating and graceful-skip rules apply as in a full refresh.
+    """
+    _llm_key = (
+        st.secrets.get("GEMINI_API_KEY")
+        or st.secrets.get("GOOGLE_API_KEY")
+        or st.secrets.get("ANTHROPIC_API_KEY")
+    )
+    if not st.secrets.get("FATHOM_API_KEY") or not _llm_key:
+        st.error(
+            "Fathom needs FATHOM_API_KEY plus an LLM key "
+            "(GEMINI_API_KEY or ANTHROPIC_API_KEY) in secrets."
+        )
+        return
+    status = st.empty()
+    report = refresh_all.refresh_all(
+        dict(st.secrets),
+        progress=lambda m: status.text(m),
+        only_stale=False,
+        names={"Fathom"},
+    )
+    status.empty()
+    if report.failed:
+        st.warning(report.summary())
+    else:
+        st.success(report.summary())
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### Data")
+
+    # Age of every source, so a single stale one can't hide behind the others.
+    for label, key in (
+        ("HubSpot", "last_full_refresh"),
+        ("Asana", "last_asana_refresh"),
+        ("Slack", "last_slack_refresh"),
+        ("Outlook", "last_outlook_refresh"),
+        ("Fathom", "last_fathom_refresh"),
+        ("LinkedIn", "last_linkedin_refresh"),
+        ("WordPress", "last_wordpress_refresh"),
+    ):
+        age = db.age_hours(key)
+        if age is None:
+            st.caption(f"{label}: never")
+        elif age > db.STALE_AFTER_HOURS:
+            st.caption(f":red[{label}: {db.describe_age(age)}]")
+        else:
+            st.caption(f"{label}: {db.describe_age(age)}")
+
+    if st.button("🔄 Refresh everything", type="primary"):
+        run_full_refresh(force=True)
+
+    with st.expander("Refresh one source"):
+        if st.button("HubSpot"):
+            refresh_from_hubspot()
+        if st.button("AuthoredUp"):
+            refresh_from_authoredup()
+        if st.button("WordPress"):
+            refresh_from_wordpress()
+        if st.button("Fathom"):
+            refresh_from_fathom()
+
+    st.markdown("---")
+    st.markdown("### Date range")
+    today = datetime.now(timezone.utc).date()
+    default_start = today - timedelta(days=90)
+    date_range = st.date_input(
+        "Period",
+        value=(default_start, today),
+        max_value=today,
+    )
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = date_range
+    else:
+        start_date, end_date = default_start, today
+
+    st.markdown("---")
+    st.markdown("### Data trust")
+    trusted_from = st.date_input(
+        "Trust data from",
+        value=datetime(2026, 2, 1).date(),
+        help="HubSpot was adopted in Feb 2026. Period-over-period comparisons (deltas) are suppressed when the prior comparison window falls before this date.",
+    )
+
+    st.markdown("---")
+    st.caption(
+        "Leads = contacts whose firm_type ∈ "
+        + ", ".join(LEAD_CATEGORIES)
+        + ". Form data from HubSpot Form Submissions API."
+    )
+
+
+# ===========================================================================
+# Marketing Command Center — exception-based, deal-focused Overview
+# ===========================================================================
+ASANA_STRATEGY_URL = "https://app.asana.com/1/1182309086818187/project/1214458328037729"
+ASANA_STRATEGY_NAME = "90-Day Marketing Demand Generation Plan"
+
+# Constructed HubSpot record URLs. Contacts/companies/deals don't return a record
+# URL from the v3 API, so we build canonical deep links:
+#   {base}/contacts/{portalId}/record/{objectTypeId}/{recordId}
+# (objectTypeId: 0-1 contact, 0-2 company, 0-3 deal). The portal ID is required for
+# the link to resolve — read it from the HUBSPOT_PORTAL_ID secret, else from cache
+# meta (auto-populated at ingest), else fall back to the legacy /_/ shortcut.
+HUBSPOT_PORTAL_BASE = st.secrets.get("HUBSPOT_PORTAL_BASE", "https://app.hubspot.com")
+HUBSPOT_PORTAL_ID = str(
+    st.secrets.get("HUBSPOT_PORTAL_ID", "") or db.get_meta("hubspot_portal_id") or "50726076"
+).strip()
+
+
+def _record_url(object_type_id: str, rid, legacy_path: str) -> str | None:
+    if not rid:
+        return None
+    if HUBSPOT_PORTAL_ID:
+        return f"{HUBSPOT_PORTAL_BASE}/contacts/{HUBSPOT_PORTAL_ID}/record/{object_type_id}/{rid}"
+    return f"{HUBSPOT_PORTAL_BASE}/contacts/_/{legacy_path}/{rid}"
+
+
+def _contact_url(cid) -> str | None:
+    return _record_url("0-1", cid, "contact")
+
+
+def _company_url(cid) -> str | None:
+    return _record_url("0-2", cid, "company")
+
+
+def _deal_url(deal_id, stored_url=None) -> str | None:
+    if stored_url:
+        return stored_url
+    return _record_url("0-3", deal_id, "deal")
+
+
+def _task_url(task_id) -> str | None:
+    # Tasks use a dedicated route (not /record/). Format confirmed for this portal.
+    return f"{HUBSPOT_PORTAL_BASE}/tasks/{HUBSPOT_PORTAL_ID}/view/all/task/{task_id}" if task_id else None
+
+
+# ---- Header: title + Asana strategy link ----
+head_l, head_r = st.columns([0.68, 0.32])
+with head_l:
+    st.title("📊 Sales Dashboard")
+with head_r:
+    st.markdown(
+        f"<div style='text-align:right; padding-top:1.5rem;'>"
+        f"<a href='{ASANA_STRATEGY_URL}' target='_blank' "
+        f"style='display:inline-block; padding:0.45rem 0.9rem; border-radius:6px; "
+        f"background:#796eff; color:#fff; font-size:0.85rem; font-weight:600; text-decoration:none;'>"
+        f"🎯 90-Day Marketing Strategy ↗</a></div>",
+        unsafe_allow_html=True,
+    )
+
+_period_days = (end_date - start_date).days + 1
+st.caption(
+    f"Period: **{start_date.strftime('%b %d, %Y')} – {end_date.strftime('%b %d, %Y')}** "
+    f"({_period_days} days). Change in the sidebar · strategy tracked in Asana: *{ASANA_STRATEGY_NAME}*."
+)
+
+# ---- Load + classify ----
+contacts = load_contacts()
+companies = load_companies()
+if contacts.empty:
+    st.warning("No data in the cache yet. Click **Refresh from HubSpot** in the sidebar.")
+    st.stop()
+# A stale cache silently misreports everything on this page — deleted tasks keep
+# their rows, closed deals stay open, new pipeline is missing. Say so up front.
+_hs_age = db.age_hours("last_full_refresh")
+if _hs_age is not None and _hs_age > db.STALE_AFTER_HOURS:
+    st.error(
+        f"⚠️ **HubSpot data is {db.describe_age(_hs_age)}.** Deals, tasks and "
+        "leads below may be wrong — deleted tasks still appear and new pipeline "
+        "is missing. Use **🔄 Refresh from HubSpot** in the sidebar.",
+    )
+
+
+classified = classify_dataframe(contacts, companies)
+submissions_df = load_form_submissions()
+deals_df = load_deals()
+tasks_df = load_tasks()
+
+now_ts = pd.Timestamp.now(tz="UTC")
+start_ts = pd.Timestamp(start_date, tz="UTC")
+end_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
+period_length = end_ts - start_ts
+prior_start_ts = start_ts - period_length
+prior_end_ts = start_ts
+
+in_period = classified[
+    (classified["createdate"] >= start_ts) & (classified["createdate"] < end_ts)
+].copy()
+in_prior_period = classified[
+    (classified["createdate"] >= prior_start_ts) & (classified["createdate"] < prior_end_ts)
+].copy()
+
+trusted_from_ts = pd.Timestamp(trusted_from, tz="UTC")
+prior_comparison_trustworthy = prior_start_ts >= trusted_from_ts
+
+
+def _fmt_delta(current: float, prior: float) -> str | None:
+    """Signed percent-change vs the prior period, or None to hide the delta."""
+    if not prior_comparison_trustworthy:
+        return None  # Prior window is pre-HubSpot — comparison would be meaningless.
+    if prior == 0:
+        return None if current == 0 else "new (vs 0)"
+    pct = (current - prior) / prior * 100
+    return f"{pct:+.0f}% vs prior"
+
+
+# ---------------------------------------------------------------------------
+# Exclusion lists (internal / vendor / partner — not prospects)
+# ---------------------------------------------------------------------------
+ICP_FIRM_TYPES_FOR_OUTREACH = {
+    "ria", "brokerdealer", "banktrust", "custodian", "asset_manager", "fintech",
+}
+# Defined in classify/companies.py so the ingest layer and the dashboard cannot
+# drift apart on who counts as a non-prospect.
+EXCLUDED_DOMAINS = _companies.EXCLUDED_COMPANY_DOMAINS
+EXCLUDED_EMAILS = {
+    "grimm.marcus@gmail.com",  # Fractional CMO (personal email)
+}
+
+
+def _domain_of(email: str | None) -> str | None:
+    if not email or "@" not in str(email):
+        return None
+    return str(email).split("@")[-1].lower().strip()
+
+
+def _is_excluded(email: str | None) -> bool:
+    if not email:
+        return False
+    e = str(email).lower().strip()
+    if e in EXCLUDED_EMAILS:
+        return True
+    dom = _domain_of(e)
+    return dom in EXCLUDED_DOMAINS if dom else False
+
+
+# ---------------------------------------------------------------------------
+# Engagement builders (hot accounts, stalled, multi-touch warm)
+# ---------------------------------------------------------------------------
+HEAT_WINDOW_DAYS = 30
+heat_cutoff = now_ts - pd.Timedelta(days=HEAT_WINDOW_DAYS)
+
+
+def _build_hot_accounts() -> pd.DataFrame:
+    """ICP firms with 2+ contacts who submitted a form in the last HEAT_WINDOW_DAYS."""
+    if submissions_df.empty or classified.empty:
+        return pd.DataFrame()
+    recent_subs = submissions_df[submissions_df["submitted_at"] >= heat_cutoff].copy()
+    if recent_subs.empty:
+        return pd.DataFrame()
+    recent_subs = recent_subs[~recent_subs["contact_email"].apply(_is_excluded)]
+    if recent_subs.empty:
+        return pd.DataFrame()
+
+    email_to_company = (
+        classified.dropna(subset=["email"])
+        .assign(email_lc=classified["email"].str.lower())
+        .set_index("email_lc")[["company_id", "lead_status", "lead_category", "firm_type"]]
+        .to_dict("index")
+    )
+    rows = []
+    for _, sub in recent_subs.iterrows():
+        email = sub.get("contact_email")
+        if not email:
+            continue
+        info = email_to_company.get(email)
+        if not info or not info.get("company_id"):
+            continue
+        rows.append({
+            "company_id": info["company_id"],
+            "contact_email": email,
+            "lead_status": info["lead_status"],
+            "submitted_at": sub["submitted_at"],
+        })
+    if not rows:
+        return pd.DataFrame()
+    eng = pd.DataFrame(rows)
+
+    company_lookup = companies.set_index("id")[["name", "domain", "firm_type"]].to_dict("index") if not companies.empty else {}
+    agg = (
+        eng.groupby("company_id")
+        .agg(
+            contacts_engaged=("contact_email", "nunique"),
+            submissions=("contact_email", "count"),
+            last_activity=("submitted_at", "max"),
+            leads_count=("lead_status", lambda s: int((s == "lead").sum())),
+        )
+        .reset_index()
+    )
+
+    def _ft(c):
+        v = company_lookup.get(c, {}).get("firm_type")
+        if v is None or (isinstance(v, float) and v != v):
+            return ""
+        return str(v).lower().strip()
+
+    def _nm(c):
+        v = company_lookup.get(c, {}).get("name")
+        if v is None or (isinstance(v, float) and v != v):
+            return None
+        return str(v)
+
+    def _dm(c):
+        v = company_lookup.get(c, {}).get("domain")
+        if v is None or (isinstance(v, float) and v != v):
+            return None
+        return str(v).lower().strip()
+
+    agg["company_name"] = agg["company_id"].apply(_nm)
+    agg["company_domain"] = agg["company_id"].apply(_dm)
+    agg["firm_type"] = agg["company_id"].apply(_ft)
+
+    agg = agg[~agg["company_domain"].fillna("").str.lower().isin(EXCLUDED_DOMAINS)]
+    agg = agg[agg["firm_type"].isin(ICP_FIRM_TYPES_FOR_OUTREACH)]
+    agg = agg[agg["contacts_engaged"] >= 2].copy()
+    if agg.empty:
+        return agg
+    agg["heat_score"] = agg["contacts_engaged"] * agg["submissions"]
+    agg["days_since"] = (now_ts - agg["last_activity"]).dt.days
+    return agg.sort_values(["heat_score", "last_activity"], ascending=[False, False])
+
+
+def _latest_activity_ts(row) -> pd.Timestamp | None:
+    candidates = []
+    for col in ("notes_last_contacted", "hs_email_last_click_date", "hs_email_last_open_date"):
+        v = row.get(col)
+        if v is None or (isinstance(v, float) and v != v) or v == "":
+            continue
+        try:
+            ts = pd.Timestamp(v)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            candidates.append(ts)
+        except (ValueError, TypeError):
+            pass
+    return max(candidates) if candidates else None
+
+
+def _build_stalled_leads() -> pd.DataFrame:
+    """ICP lead with prior pipeline activity (deal / sales touch / 2+ fills) but quiet 45+ days."""
+    if classified.empty:
+        return pd.DataFrame()
+    df = classified[classified["lead_status"] == "lead"].copy()
+    df = df[~df["email"].apply(_is_excluded)]
+    if df.empty:
+        return df
+    df["_deals"] = df.get("num_associated_deals", 0).fillna(0)
+    df["_convs"] = df.get("num_conversion_events", 0).fillna(0)
+    df["_notes"] = df.get("notes_last_contacted")
+    df["_has_pipeline"] = (
+        (df["_deals"] >= 1)
+        | (df["_notes"].notna() & (df["_notes"] != ""))
+        | (df["_convs"] >= 2)
+    )
+    df = df[df["_has_pipeline"]].copy()
+    if df.empty:
+        return df
+    # Coerce to a real datetime dtype: df.apply returns object dtype whenever any
+    # row yields None (a pipeline-flagged lead with no logged activity timestamp),
+    # and `.dt` on an object/empty Series raises. Without this the whole page
+    # blanks out in that data state.
+    df["_last_activity"] = pd.to_datetime(
+        df.apply(_latest_activity_ts, axis=1), utc=True, errors="coerce"
+    )
+    df = df[df["_last_activity"].notna()].copy()
+    df["_days_quiet"] = (now_ts - df["_last_activity"]).dt.days
+    df = df[df["_days_quiet"] >= 45].copy()
+    return df.sort_values("_days_quiet", ascending=False)
+
+
+def _build_multi_touch_warm() -> pd.DataFrame:
+    """ICP lead with 3+ conversions and zero associated deals — never started."""
+    if classified.empty:
+        return pd.DataFrame()
+    df = classified[classified["lead_status"] == "lead"].copy()
+    df = df[~df["email"].apply(_is_excluded)]
+    if df.empty:
+        return df
+    df["_convs"] = df.get("num_conversion_events", 0).fillna(0)
+    df["_deals"] = df.get("num_associated_deals", 0).fillna(0)
+    df = df[(df["_convs"] >= 3) & (df["_deals"] == 0)].copy()
+    if df.empty:
+        return df
+    df["_last_activity"] = df.apply(_latest_activity_ts, axis=1)
+    return df.sort_values("_convs", ascending=False)
+
+
+# ---------------------------------------------------------------------------
+# Deals + tasks: open pipeline, hot-deal scoring, task urgency
+# ---------------------------------------------------------------------------
+# Closed-deal detection and sample-task filtering live in classify/pipeline.py
+# so the Tasks page applies exactly the same rules.
+CLOSED_STAGES = pipeline.CLOSED_STAGES
+CLOSED_STAGE_IDS = pipeline.CLOSED_STAGE_IDS
+
+
+def _open_deals() -> pd.DataFrame:
+    return pipeline.open_deals(deals_df)
+
+
+def _active_tasks(df: pd.DataFrame) -> pd.DataFrame:
+    return pipeline.active_tasks(df)
+
+
+def _deal_ids_with_urgent_tasks(active: pd.DataFrame, horizon_days: int = 14) -> set[str]:
+    """Deal IDs that have an active task overdue or due within `horizon_days`."""
+    ids: set[str] = set()
+    if active.empty or "associated_deal_ids" not in active.columns:
+        return ids
+    horizon = now_ts + pd.Timedelta(days=horizon_days)
+    soon = active[active["due_at"] < horizon]
+    for s in soon["associated_deal_ids"].dropna():
+        for d in str(s).split(","):
+            d = d.strip()
+            if d:
+                ids.add(d)
+    return ids
+
+
+open_deals = _open_deals()
+active_tasks = _active_tasks(tasks_df)
+
+# Overdue + due-this-week task slices
+if not active_tasks.empty:
+    week_cutoff = now_ts + pd.Timedelta(days=7)
+    overdue_tasks = active_tasks[active_tasks["due_at"] < now_ts].copy()
+    tasks_due_week = active_tasks[
+        (active_tasks["due_at"] >= now_ts) & (active_tasks["due_at"] < week_cutoff)
+    ].copy()
+else:
+    overdue_tasks = pd.DataFrame()
+    tasks_due_week = pd.DataFrame()
+
+urgent_deal_ids = _deal_ids_with_urgent_tasks(active_tasks)
+
+# Open-deal lookups: the deal-focused "Do This Now" queue only surfaces tasks tied
+# to an open deal, and Hot Deals shows each deal's next scheduled task.
+open_deal_ids = set(open_deals["id"].astype(str)) if not open_deals.empty else set()
+open_deal_names = (
+    open_deals.assign(_sid=open_deals["id"].astype(str)).set_index("_sid")["name"].to_dict()
+    if not open_deals.empty else {}
+)
+
+
+def _task_open_deals(task_row) -> list[str]:
+    """Open-deal IDs this task is associated with (empty list if none)."""
+    ids = task_row.get("associated_deal_ids")
+    if not ids:
+        return []
+    return [d.strip() for d in str(ids).split(",") if d.strip() in open_deal_ids]
+
+
+# deal_id -> soonest active-task due date (drives the Hot Deals "Next action" column)
+deal_next_due: dict[str, pd.Timestamp] = {}
+if not active_tasks.empty and "associated_deal_ids" in active_tasks.columns:
+    for _, _t in active_tasks.iterrows():
+        _due = _t.get("due_at")
+        if pd.isna(_due):
+            continue
+        for _did in _task_open_deals(_t):
+            if _did not in deal_next_due or _due < deal_next_due[_did]:
+                deal_next_due[_did] = _due
+
+# Company-name lookup for the deal + lead tables
+company_name_lookup = companies.set_index("id")["name"].to_dict() if not companies.empty else {}
+
+# Hot deals: blended score (value 0.5 · close-date proximity 0.3 · activity 0.2)
+if not open_deals.empty:
+    hot_deals = open_deals.copy()
+    _max_amount = float(hot_deals["amount"].fillna(0).max() or 0.0)
+
+    def _hot_deal_score(row) -> float:
+        amount = row.get("amount") or 0
+        value_score = (amount / _max_amount) if _max_amount else 0.0
+        close_score = 0.0
+        cd = row.get("closedate")
+        if pd.notna(cd):
+            days = (cd - now_ts).days
+            if days <= 0:
+                close_score = 1.0  # close date passed — needs attention now
+            elif days <= 90:
+                close_score = 1 - days / 90
+        activity_score = 1.0 if str(row.get("id")) in urgent_deal_ids else 0.0
+        return 0.5 * value_score + 0.3 * close_score + 0.2 * activity_score
+
+    hot_deals["score"] = hot_deals.apply(_hot_deal_score, axis=1)
+    hot_deals["has_urgent_task"] = hot_deals["id"].astype(str).isin(urgent_deal_ids)
+    hot_deals = hot_deals.sort_values("score", ascending=False)
+else:
+    hot_deals = pd.DataFrame()
+
+# Deals closing inside the selected period (open only)
+if not open_deals.empty and "closedate" in open_deals.columns:
+    closing_period = open_deals[
+        (open_deals["closedate"] >= start_ts) & (open_deals["closedate"] < end_ts)
+    ].copy()
+else:
+    closing_period = pd.DataFrame()
+
+# ---- Engagement-based action sources ----
+hot_accounts_df = _build_hot_accounts()
+stalled_leads_df = _build_stalled_leads()
+multi_touch_df = _build_multi_touch_warm()
+
+# ---------------------------------------------------------------------------
+# Critical KPI figures
+# ---------------------------------------------------------------------------
+# Qualified-lead categories now live in classify/qualified.py, split by
+# sales motion (advisory vs WealthTech vendor).
+
+# Drop Ezra Group's own people, its CMO/PR/dev partners, and collaborators before
+# counting. The Qualified Leads *table* below already did this, but the headline
+# KPI did not — so the number and the list under it disagreed, and the caption
+# ("Showing 25 most recent of N") described the filtered table with the
+# unfiltered count. Filter once, here, and derive both from it.
+in_period_ex = in_period[~in_period["email"].apply(_is_excluded)]
+in_prior_period_ex = in_prior_period[~in_prior_period["email"].apply(_is_excluded)]
+
+# A qualified lead is an ICP *firm* that has actually engaged — see
+# classify/qualified.py for why (the old test was industry alone, which counted
+# 200 contacts of whom 79 had never done anything, and mixed two sales motions).
+qual_period = _qualified.qualify(in_period_ex)
+qual_prior = _qualified.qualify(in_prior_period_ex)
+
+n_advisory = _qualified.count_accounts(qual_period, "advisory")
+p_advisory = _qualified.count_accounts(qual_prior, "advisory")
+n_vendor = _qualified.count_accounts(qual_period, "vendor")
+
+# Shown alongside so the drop from the old headline number is explained rather
+# than mysterious — these are ICP contacts with no interaction recorded yet.
+n_unengaged = int(
+    (qual_period["motion"].notna() & ~qual_period["engaged"]).sum()
+)
+
+open_pipeline_value = float(open_deals["amount"].fillna(0).sum()) if not open_deals.empty else 0.0
+n_open_deals = len(open_deals)
+n_closing = len(closing_period)
+closing_value = float(closing_period["amount"].fillna(0).sum()) if not closing_period.empty else 0.0
+n_overdue = len(overdue_tasks)
+n_due_week = len(tasks_due_week)
+
+
+# ---------------------------------------------------------------------------
+# Completed-action persistence + HubSpot task completion.
+# Implemented HERE (not via new store.db / ingest.hubspot functions) on purpose:
+# Streamlit Cloud caches imported modules, so newly-added module functions can be
+# missing until a full process restart. app.py is always re-read fresh, and it
+# leans only on the long-stable db.connect() plus a direct requests call — so this
+# feature can never AttributeError the page after a plain code redeploy.
+# ---------------------------------------------------------------------------
+def _completed_actions_conn(conn):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS completed_actions "
+        "(action_key TEXT PRIMARY KEY, done_at TEXT)"
+    )
+
+
+def _done_action_keys() -> set[str]:
+    try:
+        with db.connect() as conn:
+            _completed_actions_conn(conn)
+            rows = conn.execute("SELECT action_key FROM completed_actions").fetchall()
+        return {r["action_key"] for r in rows}
+    except Exception:
+        return set()
+
+
+def _mark_action_done(action_key: str) -> None:
+    with db.connect() as conn:
+        _completed_actions_conn(conn)
+        conn.execute(
+            "INSERT INTO completed_actions (action_key, done_at) VALUES (?, ?) "
+            "ON CONFLICT(action_key) DO UPDATE SET done_at=excluded.done_at",
+            (action_key, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def _set_local_task_completed(task_id: str) -> None:
+    with db.connect() as conn:
+        conn.execute("UPDATE tasks SET status='COMPLETED' WHERE id=?", (task_id,))
+
+
+def _complete_hubspot_task(token: str, task_id: str) -> None:
+    """PATCH a HubSpot task to COMPLETED. Raises on HTTP error (e.g. 403 = missing
+    the crm.objects.tasks.write scope)."""
+    resp = requests.patch(
+        f"https://api.hubapi.com/crm/v3/objects/tasks/{task_id}",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"properties": {"hs_task_status": "COMPLETED"}},
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+
+# ===========================================================================
+# 1) ⚡ DO THIS NOW — exception-based action queue
+# ===========================================================================
+actions: list[dict] = []       # deal-focused: follow-ups that advance OPEN pipeline
+lead_actions: list[dict] = []  # pipeline generation: accounts & leads to work
+
+
+def _open_deal_task_rows(task_df: pd.DataFrame) -> pd.DataFrame:
+    """Filter a task slice to only tasks associated with an open deal, tagging each
+    with the open-deal IDs it touches."""
+    if task_df.empty:
+        return task_df
+    out = task_df.copy()
+    out["_open_deals"] = out.apply(_task_open_deals, axis=1)
+    return out[out["_open_deals"].apply(len) > 0]
+
+
+# Priority 1 — overdue tasks ON AN OPEN DEAL
+_overdue_deal_tasks = _open_deal_task_rows(overdue_tasks)
+if not _overdue_deal_tasks.empty:
+    for _, t in _overdue_deal_tasks.sort_values("due_at").head(10).iterrows():
+        due = t.get("due_at")
+        days_late = (now_ts - due).days if pd.notna(due) else None
+        deal_nm = open_deal_names.get(t["_open_deals"][0]) or "(deal)"
+        detail = (f"{days_late}d late" if days_late is not None else "overdue")
+        if pd.notna(due):
+            detail += f" · was due {due.strftime('%b %d')}"
+        detail += f" · deal: {deal_nm}"
+        actions.append({
+            "priority": 1, "icon": "🚨",
+            "type": "task", "id": t.get("id"), "key": f"task:{t.get('id')}",
+            "title": f"Overdue: {t.get('subject') or '(no subject)'}",
+            "detail": detail,
+            "link": _task_url(t.get("id")),
+            "link_label": "Open in HubSpot ↗",
+        })
+
+# Priority 2 — open deals closing this period
+if not closing_period.empty:
+    for _, d in closing_period.sort_values("amount", ascending=False).head(8).iterrows():
+        amt = d.get("amount") or 0
+        cd = d.get("closedate")
+        actions.append({
+            "priority": 2, "icon": "💰",
+            "type": "deal", "id": d["id"], "key": f"deal:{d['id']}",
+            "title": f"Advance to close: {d.get('name') or '(unnamed deal)'}",
+            "detail": f"${amt:,.0f} · {d.get('stage_label') or d.get('dealstage') or 'stage n/a'} · closes {cd.strftime('%b %d') if pd.notna(cd) else 'TBD'}",
+            "link": _deal_url(d["id"], d.get("hubspot_url")),
+            "link_label": "View deal ↗",
+        })
+
+# Priority 3 — tasks due in the next 7 days ON AN OPEN DEAL
+_due_deal_tasks = _open_deal_task_rows(tasks_due_week)
+if not _due_deal_tasks.empty:
+    for _, t in _due_deal_tasks.sort_values("due_at").head(8).iterrows():
+        due = t.get("due_at")
+        deal_nm = open_deal_names.get(t["_open_deals"][0]) or "(deal)"
+        actions.append({
+            "priority": 3, "icon": "📌",
+            "type": "task", "id": t.get("id"), "key": f"task:{t.get('id')}",
+            "title": f"Task due: {t.get('subject') or '(no subject)'}",
+            "detail": f"due {due.strftime('%b %d') if pd.notna(due) else 'soon'} · deal: {deal_nm}",
+            "link": _task_url(t.get("id")),
+            "link_label": "Open in HubSpot ↗",
+        })
+
+# ---- Pipeline generation (accounts & leads) — kept out of the deal action queue ----
+if not hot_accounts_df.empty:
+    very_hot = hot_accounts_df[hot_accounts_df["contacts_engaged"] >= 3]
+    for _, r in very_hot.head(5).iterrows():
+        name = r.get("company_name") or r.get("company_domain") or r["company_id"]
+        lead_actions.append({
+            "priority": 1, "icon": "🔥",
+            "type": "hot_account", "id": r["company_id"], "key": f"hot:{r['company_id']}",
+            "title": f"Hot account: {name} — reach out",
+            "detail": f"{int(r['contacts_engaged'])} contacts engaged · {int(r['submissions'])} form fills in {HEAT_WINDOW_DAYS}d · last touch {int(r['days_since'])}d ago",
+            "link": _company_url(r["company_id"]),
+            "link_label": "View company ↗",
+        })
+
+for _, c in stalled_leads_df.head(5).iterrows():
+    lead_actions.append({
+        "priority": 2, "icon": "⏰",
+        "type": "contact", "id": c["id"], "key": f"stalled:{c['id']}",
+        "title": f"Re-engage {c.get('email') or '(no email)'}",
+        "detail": f"{c.get('lead_category') or c.get('firm_type') or 'ICP'} · quiet {int(c['_days_quiet'])}d · had prior pipeline activity",
+        "link": _contact_url(c["id"]),
+        "link_label": "View contact ↗",
+    })
+
+for _, c in multi_touch_df.head(5).iterrows():
+    lead_actions.append({
+        "priority": 3, "icon": "💎",
+        "type": "contact", "id": c["id"], "key": f"warm:{c['id']}",
+        "title": f"Start the conversation: {c.get('email') or '(no email)'}",
+        "detail": f"{int(c['_convs'])} form fills · zero deals · {c.get('lead_category') or c.get('firm_type') or 'ICP'}",
+        "link": _contact_url(c["id"]),
+        "link_label": "View contact ↗",
+    })
+
+_hubspot_token = st.secrets.get("HUBSPOT_TOKEN", "")
+
+
+def _render_action_queue(action_list: list[dict], cap: int, empty_html: str) -> None:
+    """Render a checkbox-per-row action list. Checking a task completes it in HubSpot;
+    checking anything else just clears it. Both persist via completed_actions."""
+    done = _done_action_keys()
+    items = [a for a in action_list if a.get("key") not in done]
+    if not items:
+        st.markdown(empty_html, unsafe_allow_html=True)
+        return
+    items.sort(key=lambda a: a["priority"])
+    for a in items[:cap]:
+        chk_col, body_col = st.columns([0.05, 0.95])
+        with chk_col:
+            checked = st.checkbox(
+                "done", key=f"done_{a.get('key', a['title'])}", label_visibility="collapsed",
+                help="Mark done. Tasks → Completed in HubSpot; everything else clears from this list.",
+            )
+        with body_col:
+            link_html = (
+                f" <a href='{a['link']}' target='_blank' style='font-size:0.78rem; text-decoration:none; color:#796eff;'>{a.get('link_label', 'Open ↗')}</a>"
+                if a.get("link") else ""
+            )
+            st.markdown(
+                f"<div style='padding:0.32rem 0.7rem; margin-bottom:0.22rem; border-radius:4px; "
+                f"background:#f7f8fb; border-left:3px solid #796eff; font-size:0.88rem;'>"
+                f"<b>{a['icon']} {a['title']}</b>{link_html}<br>"
+                f"<span style='color:#666; font-size:0.8rem;'>{a['detail']}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        if checked:
+            # st.toast survives the rerun below, so the sync result stays visible.
+            if a.get("type") == "task" and a.get("id") and _hubspot_token:
+                try:
+                    _complete_hubspot_task(_hubspot_token, str(a["id"]))
+                    st.toast("Task marked Completed in HubSpot.", icon="✅")
+                    try:  # best-effort local reconcile; must not mislabel a HubSpot success
+                        _set_local_task_completed(str(a["id"]))
+                        load_tasks.clear()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    st.toast(
+                        f"Cleared here, but HubSpot completion failed ({e}). "
+                        "Add the crm.objects.tasks.write scope to sync completion.",
+                        icon="⚠️",
+                    )
+            _mark_action_done(a.get("key", a["title"]))
+            st.rerun()
+    if len(items) > cap:
+        st.caption(f"+ {len(items) - cap} more.")
+
+
+# ===========================================================================
+# 0) 📊 EXECUTIVE OVERVIEW — KPI cards + pipeline funnels (WTIS, Vendor, Wealth)
+# ===========================================================================
+# Deal-level period metrics (won / lost / new), derived from the same deals
+# frame the rest of the page uses so nothing can disagree.
+_won_period = _won_prior = _lost_period = _lost_prior = 0
+_won_value_period = _won_value_prior = 0.0
+_new_deals_period = _new_deals_prior = 0
+_won_value_by_pipeline: dict[str, float] = {}
+if not deals_df.empty:
+    _closed_won = deals_df.get("stage_is_won")
+    _closed_won = (_closed_won.fillna(0).astype(int).eq(1)
+                   if _closed_won is not None else pd.Series(False, index=deals_df.index))
+    _closed_any = deals_df.get("stage_is_closed")
+    _closed_any = (_closed_any.fillna(0).astype(int).eq(1)
+                   if _closed_any is not None else pd.Series(False, index=deals_df.index))
+    _lost = _closed_any & ~_closed_won
+    _cd = deals_df["closedate"] if "closedate" in deals_df.columns else pd.Series(pd.NaT, index=deals_df.index)
+    _in_p = _cd.notna() & (_cd >= start_ts) & (_cd < end_ts)
+    _in_pr = _cd.notna() & (_cd >= prior_start_ts) & (_cd < prior_end_ts)
+    _won_period = int((_closed_won & _in_p).sum())
+    _won_prior = int((_closed_won & _in_pr).sum())
+    _lost_period = int((_lost & _in_p).sum())
+    _lost_prior = int((_lost & _in_pr).sum())
+    _amt = deals_df["amount"].fillna(0) if "amount" in deals_df.columns else pd.Series(0.0, index=deals_df.index)
+    _won_value_period = float(_amt[_closed_won & _in_p].sum())
+    _won_value_prior = float(_amt[_closed_won & _in_pr].sum())
+    if "createdate" in deals_df.columns:
+        _crd = deals_df["createdate"]
+        _new_deals_period = int((_crd.notna() & (_crd >= start_ts) & (_crd < end_ts)).sum())
+        _new_deals_prior = int((_crd.notna() & (_crd >= prior_start_ts) & (_crd < prior_end_ts)).sum())
+    _won_sel = deals_df[_closed_won & _in_p]
+    if not _won_sel.empty and "pipeline" in _won_sel.columns:
+        _won_value_by_pipeline = (
+            _won_sel.assign(_amt=_won_sel["amount"].fillna(0))
+            .groupby(_won_sel["pipeline"].fillna("(none)"))["_amt"].sum().to_dict()
+        )
+
+
+def _win_rate(won: int, lost: int) -> float:
+    total = won + lost
+    return (won / total * 100.0) if total else 0.0
+
+
+_win_rate_period = _win_rate(_won_period, _lost_period)
+_win_rate_prior = _win_rate(_won_prior, _lost_prior)
+_avg_open_deal = (open_pipeline_value / n_open_deals) if n_open_deals else 0.0
+
+
+def _delta_ratio(cur: float, prior: float, *, invert: bool = False):
+    """(text, is_positive) percent-change vs prior period, or (None, None) to hide."""
+    if not prior_comparison_trustworthy:
+        return (None, None)
+    if prior == 0:
+        if cur == 0:
+            return (None, None)
+        return ("new vs prev", not invert)
+    change = (cur - prior) / prior * 100.0
+    positive = (change >= 0) != invert
+    return (f"{change:+.0f}% vs prev", positive)
+
+
+def _delta_points(cur: float, prior: float):
+    if not prior_comparison_trustworthy:
+        return (None, None)
+    diff = cur - prior
+    return (f"{diff:+.0f} pts vs prev", diff >= 0)
+
+
+def _kpi_card(label: str, value: str, delta_text, positive, accent: str = "#5b54e8") -> str:
+    if delta_text:
+        color = "#1a9e4b" if positive else "#d14343"
+        arrow = "▲" if positive else "▼"
+        delta_html = f"<div class='kpi-delta' style='color:{color}'>{arrow} {delta_text}</div>"
+    else:
+        delta_html = "<div class='kpi-delta kpi-delta-muted'>— vs prev</div>"
+    return (
+        f"<div class='kpi-card'><div class='kpi-label'>{label}</div>"
+        f"<div class='kpi-value' style='color:{accent}'>{value}</div>{delta_html}</div>"
+    )
+
+
+st.markdown("<div class='section-title'>📊 Executive Overview</div>", unsafe_allow_html=True)
+
+_won_delta = _delta_ratio(_won_value_period, _won_value_prior)
+_wr_delta = _delta_points(_win_rate_period, _win_rate_prior)
+_new_delta = _delta_ratio(_new_deals_period, _new_deals_prior)
+_kpi_specs = [
+    ("Open Pipeline", f"${open_pipeline_value:,.0f}",
+     (f"{n_open_deals} open deals", True) if n_open_deals else (None, None)),
+    ("Won Revenue (period)", f"${_won_value_period:,.0f}", _won_delta),
+    ("Win Rate", f"{_win_rate_period:.0f}%", _wr_delta),
+    ("New Deals (period)", f"{_new_deals_period:,}", _new_delta),
+    ("Avg Open Deal", f"${_avg_open_deal:,.0f}", (None, None)),
+    ("Closing (period)", f"${closing_value:,.0f}",
+     (f"{n_closing} deals", True) if n_closing else (None, None)),
+]
+for _col, (_lbl, _val, _d) in zip(st.columns(len(_kpi_specs)), _kpi_specs):
+    _col.markdown(_kpi_card(_lbl, _val, _d[0], _d[1]), unsafe_allow_html=True)
+
+
+# ---- Pipelines (WTIS, Vendor, Wealth): open-deal funnels by stage ----
+def _pipeline_meta() -> list[dict]:
+    # Resilient loader: reads persisted meta, else fetches live from HubSpot so
+    # the funnels show real pipeline names instead of raw IDs (877448091, …).
+    return load_deal_pipelines()
+
+
+def _pipeline_breakdowns(open_df: pd.DataFrame, meta: list[dict]) -> list[dict]:
+    """Per pipeline: ordered open stages [(label, value, count)] + totals.
+
+    Uses pipeline/stage metadata (names + order) when present; otherwise falls
+    back to grouping open deals by their raw pipeline id and stage label.
+    """
+    out: list[dict] = []
+    if meta:
+        for p in meta:
+            rows = []
+            for s in p.get("stages", []):
+                if s.get("is_closed"):
+                    continue  # funnel shows live stages only
+                if open_df.empty:
+                    sub = open_df
+                else:
+                    sub = open_df[
+                        (open_df.get("pipeline") == p["id"])
+                        & (open_df.get("dealstage") == s["id"])
+                    ]
+                val = float(sub["amount"].fillna(0).sum()) if not sub.empty else 0.0
+                rows.append((s.get("label") or "—", val, len(sub)))
+            out.append({
+                "pid": p.get("id"), "label": p.get("label") or "(pipeline)",
+                "stages": rows,
+                "open_value": sum(r[1] for r in rows),
+                "open_count": sum(r[2] for r in rows),
+            })
+        return out
+    if open_df.empty:
+        return out
+    for pid, grp in open_df.groupby(open_df["pipeline"].fillna("(none)")):
+        stage_key = grp["stage_label"].fillna(grp["dealstage"].fillna("(stage)"))
+        rows = [
+            (str(lbl), float(g["amount"].fillna(0).sum()), len(g))
+            for lbl, g in grp.groupby(stage_key)
+        ]
+        rows.sort(key=lambda r: r[1], reverse=True)
+        out.append({
+            "pid": pid, "label": str(pid), "stages": rows,
+            "open_value": sum(r[1] for r in rows),
+            "open_count": sum(r[2] for r in rows),
+        })
+    return out
+
+
+_FUNNEL_COLORS = ["#5b54e8", "#7b74ef", "#9a94f3", "#b9b5f7", "#d3d0fb", "#e7e5fd"]
+
+st.markdown("<div class='section-title'>Pipelines</div>", unsafe_allow_html=True)
+st.caption("Open deals by stage for each HubSpot pipeline. Hover a stage for its value and deal count.")
+_breakdowns = _pipeline_breakdowns(open_deals, _pipeline_meta())
+if not _breakdowns:
+    st.info(
+        "No deal pipelines in the cache yet. Confirm the `crm.objects.deals.read` "
+        "and pipelines scopes on the HubSpot Service Key, then **🔄 Refresh everything**."
+    )
+else:
+    for _i in range(0, len(_breakdowns), 3):
+        _row = _breakdowns[_i:_i + 3]
+        for _col, _bd in zip(st.columns(len(_row)), _row):
+            with _col:
+                _won_v = _won_value_by_pipeline.get(_bd["pid"], 0.0)
+                st.markdown(f"<div class='pipe-head'>{_bd['label']}</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div class='pipe-sub'>${_bd['open_value']:,.0f} open · "
+                    f"{_bd['open_count']} deals · ${_won_v:,.0f} won</div>",
+                    unsafe_allow_html=True,
+                )
+                _stages = _bd["stages"]
+                _labels = [s[0] for s in _stages]
+                _values = [s[1] for s in _stages]
+                _counts = [s[2] for s in _stages]
+                if sum(_counts) == 0:
+                    st.caption("No open deals.")
+                    continue
+                _by_value = sum(_values) > 0
+                _fig = go.Figure(go.Funnel(
+                    y=_labels,
+                    x=_values if _by_value else _counts,
+                    customdata=_counts,
+                    textposition="inside",
+                    texttemplate=("$%{x:,.0f} · %{customdata} deals" if _by_value
+                                  else "%{x} deals"),
+                    textfont={"size": 11, "color": "white"},
+                    marker={"color": _FUNNEL_COLORS[:len(_labels)]},
+                    connector={"line": {"color": "#ecedf3"}},
+                ))
+                _fig.update_layout(
+                    height=250, margin={"l": 8, "r": 8, "t": 6, "b": 6},
+                    showlegend=False, font={"size": 11},
+                    yaxis={"showticklabels": True},
+                )
+                st.plotly_chart(_fig, use_container_width=True,
+                                config={"displayModeBar": False},
+                                key=f"funnel_{_bd['pid']}")
+
+    # Summary bars: open value and won value (period) side by side, by pipeline.
+    _bar_c1, _bar_c2 = st.columns(2)
+    _p_labels = [b["label"] for b in _breakdowns]
+    with _bar_c1:
+        st.markdown("<div class='pipe-head'>Open pipeline by pipeline</div>", unsafe_allow_html=True)
+        _figo = go.Figure(go.Bar(
+            x=[b["open_value"] for b in _breakdowns], y=_p_labels, orientation="h",
+            marker={"color": "#5b54e8"}, texttemplate="$%{x:,.0f}", textposition="auto",
+        ))
+        _figo.update_layout(height=200, margin={"l": 8, "r": 8, "t": 6, "b": 6},
+                            xaxis={"title": None}, showlegend=False)
+        st.plotly_chart(_figo, use_container_width=True, config={"displayModeBar": False},
+                        key="bar_open_by_pipe")
+    with _bar_c2:
+        st.markdown("<div class='pipe-head'>Won this period by pipeline</div>", unsafe_allow_html=True)
+        _figw = go.Figure(go.Bar(
+            x=[_won_value_by_pipeline.get(b["pid"], 0.0) for b in _breakdowns], y=_p_labels,
+            orientation="h", marker={"color": "#1a9e4b"}, texttemplate="$%{x:,.0f}",
+            textposition="auto",
+        ))
+        _figw.update_layout(height=200, margin={"l": 8, "r": 8, "t": 6, "b": 6},
+                            xaxis={"title": None}, showlegend=False)
+        st.plotly_chart(_figw, use_container_width=True, config={"displayModeBar": False},
+                        key="bar_won_by_pipe")
+
+st.divider()
+
+
+st.markdown("#### ⚡ Do This Now")
+st.caption("Follow-ups on **open deals** only — overdue/due tasks tied to live pipeline, plus deals closing this period. Check a box to mark done (tasks are set Completed in HubSpot).")
+_render_action_queue(
+    actions, 12,
+    "<div style='padding:0.5rem 0.8rem; border-radius:6px; background:#e8f5e9; "
+    "border-left:4px solid #4caf50; font-size:0.9rem;'>"
+    "<b>✅ Pipeline's clear.</b> No overdue or due-soon tasks on open deals, and nothing closing that needs a push.</div>",
+)
+
+with st.expander(f"🌱 Pipeline generation — accounts & leads to work ({len(lead_actions)})", expanded=False):
+    _render_action_queue(
+        lead_actions, 15,
+        "<div style='font-size:0.85rem; color:#666;'>No hot accounts or stalled / warm leads right now.</div>",
+    )
+
+
+# ===========================================================================
+# 2) Critical KPIs
+# ===========================================================================
+st.markdown("#### Marketing & Tasks")
+k1, k2 = st.columns(2)
+with k1:
+    st.metric(
+        "Advisory prospects", f"{n_advisory:,}",
+        delta=_fmt_delta(n_advisory, p_advisory),
+        help="RIA + Broker-Dealer **firms** that engaged this period — filled in a "
+             "form, opened or clicked an email, were logged as contacted, or have a "
+             "deal. Counts firms, not people.",
+    )
+    st.caption(f"🤝 {n_vendor} WealthTech vendor firms (WTIS) · {n_unengaged} not yet engaged")
+with k2:
+    st.metric(
+        "Tasks overdue", f"{n_overdue:,}",
+        delta=f"{n_due_week} due in 7d",
+        delta_color="off",
+        help="Open tasks past their due date. Delta = tasks due within the next 7 days. Requires crm.objects.tasks.read scope.",
+    )
+
+
+# ===========================================================================
+# 3) 🔥 Hot Deals
+# ===========================================================================
+st.markdown("#### 🔥 Hot Deals — open deals ranked by value, close date & activity")
+if hot_deals.empty:
+    st.info(
+        "No open deals in the cache. If you expect deals here, confirm the "
+        "`crm.objects.deals.read` scope on the HubSpot Service Key, then refresh."
+    )
+else:
+    hd = hot_deals.head(12).copy()
+    hd["Deal"] = hd["name"]
+    hd["Company"] = hd["primary_company_id"].apply(lambda c: company_name_lookup.get(c) if c else None)
+    hd["Amount"] = hd["amount"].fillna(0)
+    hd["Stage"] = hd["stage_label"].fillna(hd["dealstage"])
+    hd["Close date"] = hd["closedate"].dt.date if "closedate" in hd.columns else None
+    if "createdate" in hd.columns:
+        _created = pd.to_datetime(hd["createdate"], errors="coerce", utc=True)
+        hd["Days open"] = (now_ts - _created).dt.days.astype("Int64")
+    else:
+        hd["Days open"] = pd.array([pd.NA] * len(hd), dtype="Int64")
+
+    def _next_action(deal_id) -> str:
+        due = deal_next_due.get(str(deal_id))
+        if due is None:
+            return "⚠ none"
+        return f"overdue · {due.strftime('%b %d')}" if due < now_ts else due.strftime("%b %d")
+
+    hd["Next action"] = hd["id"].apply(_next_action)
+    hd["HubSpot"] = hd.apply(lambda r: _deal_url(r["id"], r.get("hubspot_url")), axis=1)
+    st.dataframe(
+        hd[["Deal", "Company", "Amount", "Stage", "Close date", "Days open", "Next action", "HubSpot"]],
+        width="stretch", hide_index=True, height=420,
+        column_config={
+            "Deal": st.column_config.TextColumn(width="medium"),
+            "Company": st.column_config.TextColumn(width="medium"),
+            "Amount": st.column_config.NumberColumn(format="$%d", width="small"),
+            "Days open": st.column_config.NumberColumn(width="small", help="Days since the deal was created"),
+            "Next action": st.column_config.TextColumn(width="small", help="Next scheduled task on the deal — '⚠ none' means no task is set"),
+            "HubSpot": st.column_config.LinkColumn("Open", display_text="Open ↗", width="small"),
+        },
+    )
+
+
+# ===========================================================================
+# 4) 🎯 Qualified Leads
+# ===========================================================================
+st.markdown("#### 🎯 Qualified Leads — engaged ICP firms in period")
+_motion_label = st.radio(
+    "Motion", ["Advisory (RIA · Broker-Dealer)", "WealthTech vendors (WTIS)"],
+    horizontal=True, label_visibility="collapsed",
+)
+_motion = "advisory" if _motion_label.startswith("Advisory") else "vendor"
+ql = _qualified.qualified_contacts(qual_period, _motion).copy()
+if ql.empty:
+    st.info("No engaged ICP firms in the selected period for this motion.")
+else:
+    ql = ql.sort_values("createdate", ascending=False).head(25)
+
+    def _as_date(v):
+        if v is None or (isinstance(v, float) and v != v) or v == "":
+            return None
+        try:
+            ts = pd.Timestamp(v)
+            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+            return ts.date()
+        except (ValueError, TypeError):
+            return None
+
+    ql["Created"] = ql["createdate"].dt.date
+    ql["Email"] = ql["email"]
+    ql["Company"] = ql["company_id"].apply(lambda c: company_name_lookup.get(c) if c else None)
+    ql["Category"] = ql["lead_category"]
+    ql["Source"] = ql["hs_analytics_source"] if "hs_analytics_source" in ql.columns else None
+    ql["Came in on"] = ql["first_conversion_event_name"] if "first_conversion_event_name" in ql.columns else None
+    ql["Last contacted"] = (
+        ql["notes_last_contacted"].apply(_as_date) if "notes_last_contacted" in ql.columns else None
+    )
+    ql["HubSpot"] = ql["id"].apply(_contact_url)
+    st.dataframe(
+        ql[["Created", "Email", "Company", "Category", "Source", "Came in on", "Last contacted", "HubSpot"]],
+        width="stretch", hide_index=True, height=420,
+        column_config={
+            "Email": st.column_config.TextColumn(width="medium"),
+            "Company": st.column_config.TextColumn(width="medium"),
+            "Category": st.column_config.TextColumn(width="small"),
+            "Source": st.column_config.TextColumn(width="small", help="HubSpot original source — the channel they arrived through"),
+            "Came in on": st.column_config.TextColumn(width="medium", help="First conversion — the form/campaign that first captured them"),
+            "Last contacted": st.column_config.DateColumn(width="small", help="Most recent logged contact (HubSpot notes_last_contacted)"),
+            "HubSpot": st.column_config.LinkColumn("Open", display_text="Open ↗", width="small"),
+        },
+    )
+    # Count against the same filtered, motion-scoped set the table shows — the
+    # old check used the unfiltered contact count and so fired inconsistently.
+    if len(_qualified.qualified_contacts(qual_period, _motion)) > 25:
+        st.caption(
+            f"Showing the 25 most recent contacts behind "
+            f"{n_advisory if _motion == 'advisory' else n_vendor} engaged "
+            f"{_motion} firm(s). A firm counts once however many contacts it has. "
+            "Full list on the **Leads** page."
+        )
+
+st.divider()
+st.caption(
+    "Detail moved to dedicated pages (left sidebar) → **Leads** · **Backlog** (classification cleanup) · "
+    "**Forms** · **LinkedIn** · **Content**. This page stays focused on what needs action now."
+)

@@ -9,8 +9,6 @@ import streamlit as st
 
 from store import db
 
-st.set_page_config(page_title="LinkedIn — EG Marketing Dashboard", page_icon="💼", layout="wide")
-
 if not st.session_state.get("authed"):
     st.warning("Sign in on the main page first.")
     st.stop()
@@ -45,36 +43,147 @@ if posts.empty:
     )
     st.stop()
 
-# ---- Filters ----
+# ---- Actor scope (drives the whole page) ----
 today = datetime.now(timezone.utc).date()
 default_start = today - timedelta(days=90)
 
-col_actor, col_date = st.columns([0.4, 0.6])
+actor_options = ["All actors"] + actors["name"].fillna("(unknown)").tolist()
+selected_actor = st.selectbox("Actor", options=actor_options, index=0)
+if selected_actor != "All actors":
+    actor_id = actors[actors["name"] == selected_actor]["id"].iloc[0]
+    actor_posts = posts[posts["actor_id"] == actor_id].copy()
+else:
+    actor_posts = posts.copy()
 
-with col_actor:
-    actor_options = ["All actors"] + actors["name"].fillna("(unknown)").tolist()
-    selected_actor = st.selectbox("Actor", options=actor_options, index=0)
 
-with col_date:
-    date_range = st.date_input(
-        "Period",
-        value=(default_start, today),
-        max_value=today,
+# ===========================================================================
+# Recommended actions + trailing-window comparisons (30 / 60 / 90 / 365 days)
+# ===========================================================================
+def _col_sum(df: pd.DataFrame, col: str) -> float:
+    return float(df[col].fillna(0).sum()) if col in df.columns else 0.0
+
+
+def _wstats(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> dict:
+    """Aggregate the key metrics over [start, end)."""
+    w = df[(df["published_at"] >= start) & (df["published_at"] < end)]
+    react, comm, shar = _col_sum(w, "reaction_count"), _col_sum(w, "comment_count"), _col_sum(w, "share_count")
+    rate = w["engagement_rate"].dropna() if "engagement_rate" in w.columns else pd.Series(dtype=float)
+    return {
+        "Posts": float(len(w)),
+        "Impressions": _col_sum(w, "impression_count"),
+        "Comments": comm,
+        "Reactions": react,
+        "Shares": shar,
+        "Engagement": react + comm + shar,
+        "Followers gained": _col_sum(w, "followers_gained_count"),
+        "Avg eng. rate": float(rate.mean()) if not rate.empty else 0.0,
+    }
+
+
+_now = pd.Timestamp.now(tz="UTC")
+_day = pd.Timedelta(days=1)
+# Current = last 30 days. Each prior window is the 30-day block ending that many
+# days ago, so deltas read as "this month vs the month that ended 30/60/90/365d ago".
+cur = _wstats(actor_posts, _now - 30 * _day, _now)
+prior = {
+    "vs 30d prior": _wstats(actor_posts, _now - 60 * _day, _now - 30 * _day),
+    "vs 60d prior": _wstats(actor_posts, _now - 90 * _day, _now - 60 * _day),
+    "vs 90d prior": _wstats(actor_posts, _now - 120 * _day, _now - 90 * _day),
+    "vs 1y prior": _wstats(actor_posts, _now - 395 * _day, _now - 365 * _day),
+}
+p30 = prior["vs 30d prior"]
+
+
+def _pct(cur_v: float, prior_v: float) -> str:
+    if prior_v == 0:
+        return "—" if cur_v == 0 else "new"
+    return f"{(cur_v - prior_v) / prior_v * 100:+.0f}%"
+
+
+def _fmt(metric: str, value: float) -> str:
+    if metric == "Avg eng. rate":
+        return f"{value:.2%}" if value < 1 else f"{value:.1f}%"
+    return f"{value:,.0f}"
+
+
+# ---- Recommended actions (top of page) ----
+st.subheader("✅ Recommended actions")
+_scope = "across all actors" if selected_actor == "All actors" else f"for **{selected_actor}**"
+_actions: list[str] = []
+if cur["Posts"] == 0:
+    _actions.append(
+        f"🔴 **No posts in the last 30 days** {_scope}. Publishing has stopped — get back on a "
+        "cadence; visibility and inbound both decay fast without it."
     )
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        start_date, end_date = date_range
-    else:
-        start_date, end_date = default_start, today
+elif cur["Posts"] < p30["Posts"]:
+    _actions.append(
+        f"🟠 **Posting slowed** — {cur['Posts']:.0f} posts in the last 30 days vs "
+        f"{p30['Posts']:.0f} the month before. Aim to at least match last month's cadence."
+    )
+if p30["Comments"] > 0 and cur["Comments"] < p30["Comments"]:
+    _actions.append(
+        f"🟠 **Comments down {_pct(cur['Comments'], p30['Comments'])}** vs the prior 30 days. Comments are "
+        "the highest-signal B2B metric — end posts with a direct question and reply to every comment."
+    )
+elif cur["Comments"] > p30["Comments"] and p30["Comments"] > 0:
+    _actions.append(
+        f"🟢 **Comments up {_pct(cur['Comments'], p30['Comments'])}** vs the prior 30 days — the current "
+        "format is landing. Keep doing more of it."
+    )
+if p30["Impressions"] > 0 and cur["Impressions"] < p30["Impressions"] * 0.8:
+    _actions.append(
+        f"🟠 **Reach fell {_pct(cur['Impressions'], p30['Impressions'])}** vs last month. Try posting at your "
+        "best-performing time and leading with a stronger hook."
+    )
+# Point at the single best recent post to replicate.
+_recent = actor_posts[actor_posts["published_at"] >= _now - 30 * _day]
+if not _recent.empty and "comment_count" in _recent.columns and _recent["comment_count"].fillna(0).max() > 0:
+    _best = _recent.loc[_recent["comment_count"].fillna(0).idxmax()]
+    _snippet = str(_best.get("text") or "").strip().replace("\n", " ")[:110]
+    _actions.append(
+        f"🟢 **Replicate your best recent post** ({int(_best['comment_count'])} comments): “{_snippet}…”"
+    )
+if not _actions:
+    _actions.append(
+        "🟢 **Cadence and engagement are steady or up vs last month.** Keep publishing on schedule "
+        "and keep replying to comments."
+    )
+for _a in _actions[:5]:
+    st.markdown(f"- {_a}")
+
+# ---- KPI comparison: last 30 days vs 30 / 60 / 90 days & 1 year prior ----
+st.subheader("📈 Last 30 days vs prior periods")
+_mc = st.columns(5)
+for _col, _m in zip(_mc, ["Posts", "Impressions", "Comments", "Engagement", "Followers gained"]):
+    _delta = None if p30[_m] == 0 else f"{(cur[_m] - p30[_m]) / p30[_m] * 100:+.0f}% vs 30d ago"
+    _col.metric(f"{_m} (30d)", _fmt(_m, cur[_m]), _delta, delta_color="off" if _m == "Followers gained" else "normal")
+
+_comp_rows = []
+for _m in ["Posts", "Impressions", "Comments", "Reactions", "Engagement", "Followers gained", "Avg eng. rate"]:
+    _row = {"Metric": _m, "Last 30d": _fmt(_m, cur[_m])}
+    for _lbl, _w in prior.items():
+        _row[_lbl] = _pct(cur[_m], _w[_m])
+    _comp_rows.append(_row)
+st.caption("Each column is the percent change vs the 30-day window that ended that long ago (seasonality for the 1-year column).")
+st.dataframe(pd.DataFrame(_comp_rows), width="stretch", hide_index=True)
+
+st.divider()
+
+# ===========================================================================
+# Period detail (date-range driven) — scoped to the selected actor
+# ===========================================================================
+date_range = st.date_input("Period", value=(default_start, today), max_value=today)
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    start_date, end_date = date_range
+else:
+    start_date, end_date = default_start, today
 
 start_ts = pd.Timestamp(start_date, tz="UTC")
 end_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
 
-filtered = posts[
-    (posts["published_at"] >= start_ts) & (posts["published_at"] < end_ts)
+filtered = actor_posts[
+    (actor_posts["published_at"] >= start_ts) & (actor_posts["published_at"] < end_ts)
 ].copy()
-if selected_actor != "All actors":
-    actor_id = actors[actors["name"] == selected_actor]["id"].iloc[0]
-    filtered = filtered[filtered["actor_id"] == actor_id]
 
 # ---- KPI row ----
 def _sum(col: str) -> int:
