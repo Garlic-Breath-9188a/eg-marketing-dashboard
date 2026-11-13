@@ -1,9 +1,11 @@
 """EG Marketing Dashboard — main entry / Command Center page."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -35,6 +37,23 @@ st.markdown(
       h4 { font-size: 0.95rem !important; padding-top: 0.4rem !important; margin-bottom: 0.3rem !important; }
       hr { margin: 0.5rem 0 !important; }
       div[data-testid="stHorizontalBlock"] { gap: 0.5rem; }
+
+      /* Executive overview KPI cards (reference-style) */
+      .kpi-card {
+        background: #ffffff; border: 1px solid #ecedf3; border-radius: 12px;
+        padding: 0.85rem 1rem 0.75rem; box-shadow: 0 1px 2px rgba(16,24,40,0.05);
+        height: 100%; min-height: 108px;
+      }
+      .kpi-label {
+        font-size: 0.72rem; color: #667085; font-weight: 600; line-height: 1.2;
+        margin-bottom: 0.4rem; min-height: 1.9em;
+      }
+      .kpi-value { font-size: 1.7rem; font-weight: 800; line-height: 1.05; letter-spacing: -0.5px; }
+      .kpi-delta { font-size: 0.72rem; font-weight: 600; margin-top: 0.35rem; }
+      .kpi-delta-muted { color: #98a2b3; }
+      .pipe-head { font-size: 0.98rem; font-weight: 700; color: #1d2433; margin: 0.2rem 0 0.1rem; }
+      .pipe-sub { font-size: 0.75rem; color: #667085; margin-bottom: 0.1rem; }
+      .section-title { font-size: 1.15rem; font-weight: 700; color: #1d2433; margin: 0.6rem 0 0.3rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -643,7 +662,13 @@ def _build_stalled_leads() -> pd.DataFrame:
     df = df[df["_has_pipeline"]].copy()
     if df.empty:
         return df
-    df["_last_activity"] = df.apply(_latest_activity_ts, axis=1)
+    # Coerce to a real datetime dtype: df.apply returns object dtype whenever any
+    # row yields None (a pipeline-flagged lead with no logged activity timestamp),
+    # and `.dt` on an object/empty Series raises. Without this the whole page
+    # blanks out in that data state.
+    df["_last_activity"] = pd.to_datetime(
+        df.apply(_latest_activity_ts, axis=1), utc=True, errors="coerce"
+    )
     df = df[df["_last_activity"].notna()].copy()
     df["_days_quiet"] = (now_ts - df["_last_activity"]).dt.days
     df = df[df["_days_quiet"] >= 45].copy()
@@ -1029,6 +1054,242 @@ def _render_action_queue(action_list: list[dict], cap: int, empty_html: str) -> 
         st.caption(f"+ {len(items) - cap} more.")
 
 
+# ===========================================================================
+# 0) 📊 EXECUTIVE OVERVIEW — KPI cards + pipeline funnels (WTIS, Vendor, Wealth)
+# ===========================================================================
+# Deal-level period metrics (won / lost / new), derived from the same deals
+# frame the rest of the page uses so nothing can disagree.
+_won_period = _won_prior = _lost_period = _lost_prior = 0
+_won_value_period = _won_value_prior = 0.0
+_new_deals_period = _new_deals_prior = 0
+_won_value_by_pipeline: dict[str, float] = {}
+if not deals_df.empty:
+    _closed_won = deals_df.get("stage_is_won")
+    _closed_won = (_closed_won.fillna(0).astype(int).eq(1)
+                   if _closed_won is not None else pd.Series(False, index=deals_df.index))
+    _closed_any = deals_df.get("stage_is_closed")
+    _closed_any = (_closed_any.fillna(0).astype(int).eq(1)
+                   if _closed_any is not None else pd.Series(False, index=deals_df.index))
+    _lost = _closed_any & ~_closed_won
+    _cd = deals_df["closedate"] if "closedate" in deals_df.columns else pd.Series(pd.NaT, index=deals_df.index)
+    _in_p = _cd.notna() & (_cd >= start_ts) & (_cd < end_ts)
+    _in_pr = _cd.notna() & (_cd >= prior_start_ts) & (_cd < prior_end_ts)
+    _won_period = int((_closed_won & _in_p).sum())
+    _won_prior = int((_closed_won & _in_pr).sum())
+    _lost_period = int((_lost & _in_p).sum())
+    _lost_prior = int((_lost & _in_pr).sum())
+    _amt = deals_df["amount"].fillna(0) if "amount" in deals_df.columns else pd.Series(0.0, index=deals_df.index)
+    _won_value_period = float(_amt[_closed_won & _in_p].sum())
+    _won_value_prior = float(_amt[_closed_won & _in_pr].sum())
+    if "createdate" in deals_df.columns:
+        _crd = deals_df["createdate"]
+        _new_deals_period = int((_crd.notna() & (_crd >= start_ts) & (_crd < end_ts)).sum())
+        _new_deals_prior = int((_crd.notna() & (_crd >= prior_start_ts) & (_crd < prior_end_ts)).sum())
+    _won_sel = deals_df[_closed_won & _in_p]
+    if not _won_sel.empty and "pipeline" in _won_sel.columns:
+        _won_value_by_pipeline = (
+            _won_sel.assign(_amt=_won_sel["amount"].fillna(0))
+            .groupby(_won_sel["pipeline"].fillna("(none)"))["_amt"].sum().to_dict()
+        )
+
+
+def _win_rate(won: int, lost: int) -> float:
+    total = won + lost
+    return (won / total * 100.0) if total else 0.0
+
+
+_win_rate_period = _win_rate(_won_period, _lost_period)
+_win_rate_prior = _win_rate(_won_prior, _lost_prior)
+_avg_open_deal = (open_pipeline_value / n_open_deals) if n_open_deals else 0.0
+
+
+def _delta_ratio(cur: float, prior: float, *, invert: bool = False):
+    """(text, is_positive) percent-change vs prior period, or (None, None) to hide."""
+    if not prior_comparison_trustworthy:
+        return (None, None)
+    if prior == 0:
+        if cur == 0:
+            return (None, None)
+        return ("new vs prev", not invert)
+    change = (cur - prior) / prior * 100.0
+    positive = (change >= 0) != invert
+    return (f"{change:+.0f}% vs prev", positive)
+
+
+def _delta_points(cur: float, prior: float):
+    if not prior_comparison_trustworthy:
+        return (None, None)
+    diff = cur - prior
+    return (f"{diff:+.0f} pts vs prev", diff >= 0)
+
+
+def _kpi_card(label: str, value: str, delta_text, positive, accent: str = "#5b54e8") -> str:
+    if delta_text:
+        color = "#1a9e4b" if positive else "#d14343"
+        arrow = "▲" if positive else "▼"
+        delta_html = f"<div class='kpi-delta' style='color:{color}'>{arrow} {delta_text}</div>"
+    else:
+        delta_html = "<div class='kpi-delta kpi-delta-muted'>— vs prev</div>"
+    return (
+        f"<div class='kpi-card'><div class='kpi-label'>{label}</div>"
+        f"<div class='kpi-value' style='color:{accent}'>{value}</div>{delta_html}</div>"
+    )
+
+
+st.markdown("<div class='section-title'>📊 Executive Overview</div>", unsafe_allow_html=True)
+
+_won_delta = _delta_ratio(_won_value_period, _won_value_prior)
+_wr_delta = _delta_points(_win_rate_period, _win_rate_prior)
+_new_delta = _delta_ratio(_new_deals_period, _new_deals_prior)
+_kpi_specs = [
+    ("Open Pipeline", f"${open_pipeline_value:,.0f}",
+     (f"{n_open_deals} open deals", True) if n_open_deals else (None, None)),
+    ("Won Revenue (period)", f"${_won_value_period:,.0f}", _won_delta),
+    ("Win Rate", f"{_win_rate_period:.0f}%", _wr_delta),
+    ("New Deals (period)", f"{_new_deals_period:,}", _new_delta),
+    ("Avg Open Deal", f"${_avg_open_deal:,.0f}", (None, None)),
+    ("Closing (period)", f"${closing_value:,.0f}",
+     (f"{n_closing} deals", True) if n_closing else (None, None)),
+]
+for _col, (_lbl, _val, _d) in zip(st.columns(len(_kpi_specs)), _kpi_specs):
+    _col.markdown(_kpi_card(_lbl, _val, _d[0], _d[1]), unsafe_allow_html=True)
+
+
+# ---- Pipelines (WTIS, Vendor, Wealth): open-deal funnels by stage ----
+def _pipeline_meta() -> list[dict]:
+    raw = db.get_meta("deal_pipelines")
+    if not raw:
+        return []
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+
+
+def _pipeline_breakdowns(open_df: pd.DataFrame, meta: list[dict]) -> list[dict]:
+    """Per pipeline: ordered open stages [(label, value, count)] + totals.
+
+    Uses pipeline/stage metadata (names + order) when present; otherwise falls
+    back to grouping open deals by their raw pipeline id and stage label.
+    """
+    out: list[dict] = []
+    if meta:
+        for p in meta:
+            rows = []
+            for s in p.get("stages", []):
+                if s.get("is_closed"):
+                    continue  # funnel shows live stages only
+                if open_df.empty:
+                    sub = open_df
+                else:
+                    sub = open_df[
+                        (open_df.get("pipeline") == p["id"])
+                        & (open_df.get("dealstage") == s["id"])
+                    ]
+                val = float(sub["amount"].fillna(0).sum()) if not sub.empty else 0.0
+                rows.append((s.get("label") or "—", val, len(sub)))
+            out.append({
+                "pid": p.get("id"), "label": p.get("label") or "(pipeline)",
+                "stages": rows,
+                "open_value": sum(r[1] for r in rows),
+                "open_count": sum(r[2] for r in rows),
+            })
+        return out
+    if open_df.empty:
+        return out
+    for pid, grp in open_df.groupby(open_df["pipeline"].fillna("(none)")):
+        stage_key = grp["stage_label"].fillna(grp["dealstage"].fillna("(stage)"))
+        rows = [
+            (str(lbl), float(g["amount"].fillna(0).sum()), len(g))
+            for lbl, g in grp.groupby(stage_key)
+        ]
+        rows.sort(key=lambda r: r[1], reverse=True)
+        out.append({
+            "pid": pid, "label": str(pid), "stages": rows,
+            "open_value": sum(r[1] for r in rows),
+            "open_count": sum(r[2] for r in rows),
+        })
+    return out
+
+
+_FUNNEL_COLORS = ["#5b54e8", "#7b74ef", "#9a94f3", "#b9b5f7", "#d3d0fb", "#e7e5fd"]
+
+st.markdown("<div class='section-title'>Pipelines</div>", unsafe_allow_html=True)
+st.caption("Open deals by stage for each HubSpot pipeline. Hover a stage for its value and deal count.")
+_breakdowns = _pipeline_breakdowns(open_deals, _pipeline_meta())
+if not _breakdowns:
+    st.info(
+        "No deal pipelines in the cache yet. Confirm the `crm.objects.deals.read` "
+        "and pipelines scopes on the HubSpot Service Key, then **🔄 Refresh everything**."
+    )
+else:
+    for _i in range(0, len(_breakdowns), 3):
+        _row = _breakdowns[_i:_i + 3]
+        for _col, _bd in zip(st.columns(len(_row)), _row):
+            with _col:
+                _won_v = _won_value_by_pipeline.get(_bd["pid"], 0.0)
+                st.markdown(f"<div class='pipe-head'>{_bd['label']}</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div class='pipe-sub'>${_bd['open_value']:,.0f} open · "
+                    f"{_bd['open_count']} deals · ${_won_v:,.0f} won</div>",
+                    unsafe_allow_html=True,
+                )
+                _stages = _bd["stages"]
+                _labels = [s[0] for s in _stages]
+                _values = [s[1] for s in _stages]
+                _counts = [s[2] for s in _stages]
+                if sum(_counts) == 0:
+                    st.caption("No open deals.")
+                    continue
+                _by_value = sum(_values) > 0
+                _fig = go.Figure(go.Funnel(
+                    y=_labels,
+                    x=_values if _by_value else _counts,
+                    customdata=_counts,
+                    textposition="inside",
+                    texttemplate=("$%{x:,.0f} · %{customdata} deals" if _by_value
+                                  else "%{x} deals"),
+                    textfont={"size": 11, "color": "white"},
+                    marker={"color": _FUNNEL_COLORS[:len(_labels)]},
+                    connector={"line": {"color": "#ecedf3"}},
+                ))
+                _fig.update_layout(
+                    height=250, margin={"l": 8, "r": 8, "t": 6, "b": 6},
+                    showlegend=False, font={"size": 11},
+                    yaxis={"showticklabels": True},
+                )
+                st.plotly_chart(_fig, use_container_width=True,
+                                config={"displayModeBar": False},
+                                key=f"funnel_{_bd['pid']}")
+
+    # Summary bars: open value and won value (period) side by side, by pipeline.
+    _bar_c1, _bar_c2 = st.columns(2)
+    _p_labels = [b["label"] for b in _breakdowns]
+    with _bar_c1:
+        st.markdown("<div class='pipe-head'>Open pipeline by pipeline</div>", unsafe_allow_html=True)
+        _figo = go.Figure(go.Bar(
+            x=[b["open_value"] for b in _breakdowns], y=_p_labels, orientation="h",
+            marker={"color": "#5b54e8"}, texttemplate="$%{x:,.0f}", textposition="auto",
+        ))
+        _figo.update_layout(height=200, margin={"l": 8, "r": 8, "t": 6, "b": 6},
+                            xaxis={"title": None}, showlegend=False)
+        st.plotly_chart(_figo, use_container_width=True, config={"displayModeBar": False},
+                        key="bar_open_by_pipe")
+    with _bar_c2:
+        st.markdown("<div class='pipe-head'>Won this period by pipeline</div>", unsafe_allow_html=True)
+        _figw = go.Figure(go.Bar(
+            x=[_won_value_by_pipeline.get(b["pid"], 0.0) for b in _breakdowns], y=_p_labels,
+            orientation="h", marker={"color": "#1a9e4b"}, texttemplate="$%{x:,.0f}",
+            textposition="auto",
+        ))
+        _figw.update_layout(height=200, margin={"l": 8, "r": 8, "t": 6, "b": 6},
+                            xaxis={"title": None}, showlegend=False)
+        st.plotly_chart(_figw, use_container_width=True, config={"displayModeBar": False},
+                        key="bar_won_by_pipe")
+
+st.divider()
+
+
 st.markdown("#### ⚡ Do This Now")
 st.caption("Follow-ups on **open deals** only — overdue/due tasks tied to live pipeline, plus deals closing this period. Check a box to mark done (tasks are set Completed in HubSpot).")
 _render_action_queue(
@@ -1048,8 +1309,8 @@ with st.expander(f"🌱 Pipeline generation — accounts & leads to work ({len(l
 # ===========================================================================
 # 2) Critical KPIs
 # ===========================================================================
-st.markdown("#### Critical KPIs")
-k1, k2, k3, k4 = st.columns(4)
+st.markdown("#### Marketing & Tasks")
+k1, k2 = st.columns(2)
 with k1:
     st.metric(
         "Advisory prospects", f"{n_advisory:,}",
@@ -1060,20 +1321,6 @@ with k1:
     )
     st.caption(f"🤝 {n_vendor} WealthTech vendor firms (WTIS) · {n_unengaged} not yet engaged")
 with k2:
-    st.metric(
-        "Open pipeline", f"${open_pipeline_value:,.0f}",
-        delta=(f"{n_open_deals} open deals" if n_open_deals else "no deal data"),
-        delta_color="off",
-        help="Total dollar value of all open (not closed) deals. Requires crm.objects.deals.read scope.",
-    )
-with k3:
-    st.metric(
-        "Closing this period", f"{n_closing:,}",
-        delta=(f"${closing_value:,.0f} at stake" if n_closing else "none scheduled"),
-        delta_color="off",
-        help="Open deals with a close date inside the selected period.",
-    )
-with k4:
     st.metric(
         "Tasks overdue", f"{n_overdue:,}",
         delta=f"{n_due_week} due in 7d",
