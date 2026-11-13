@@ -28,8 +28,6 @@ from classify import followup, pipeline, priority
 from classify.company_link import CompanyResolver
 from store import db
 
-st.set_page_config(page_title="Daily Briefing — EG", page_icon="🗞️", layout="wide")
-
 if not st.session_state.get("authed"):
     st.warning("Sign in on the main page first.")
     st.stop()
@@ -118,13 +116,27 @@ if not prospect_calls.empty:
         for _, r in live.iterrows()
     )
 
-pipeline_value = float(open_deals["amount"].fillna(0).sum()) if not open_deals.empty else 0.0
+st.caption(
+    "Your **today** view — overdue and due-today work across Asana *and* HubSpot, "
+    "plus prospect follow-ups owed. Pipeline value, hot deals and qualified leads "
+    "live on the **Sales** page and are not repeated here."
+)
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Overdue", f"{a_over + h_over:,}", help="Asana + HubSpot tasks past due.")
-c2.metric("Due today", f"{a_today + h_today:,}")
+c1, c2, c3 = st.columns(3)
+c1.metric("Overdue", f"{a_over + h_over:,}", help="Asana + HubSpot tasks past their due date.")
+c2.metric("Due today", f"{a_today + h_today:,}", help="Asana + HubSpot tasks due today.")
 c3.metric("Follow-ups owed", f"{awaiting:,}", help="Prospect calls with no follow-up email after 2+ business days.")
-c4.metric("Open pipeline", f"${pipeline_value:,.0f}", delta=f"{len(open_deals)} deals")
+
+# One-line pipeline pulse — the detail lives on the Sales page, not duplicated.
+if not open_deals.empty:
+    _close = _as_date(open_deals["closedate"])
+    _week = today + timedelta(days=7)
+    _closing = open_deals[[_is_date(d) and today <= d <= _week for d in _close]]
+    if not _closing.empty:
+        st.caption(
+            f"💰 **{len(_closing)} deal(s) closing in the next 7 days** — "
+            f"${_closing['amount'].fillna(0).sum():,.0f} at stake. See the **Sales** page for detail."
+        )
 
 st.divider()
 
@@ -152,66 +164,41 @@ if not prospect_calls.empty and awaiting:
 else:
     st.success("No prospect call is waiting on a follow-up.")
 
-# --- overdue work ----------------------------------------------------------
-st.subheader("⚠️ Overdue")
-overdue_rows = []
+# --- due today & overdue (Asana + HubSpot) ---------------------------------
+# The cross-source task view is this page's reason to exist: the Sales page's
+# "Do This Now" is scoped to open-deal tasks only, so Asana work and non-deal
+# HubSpot tasks never surface there. Here they do, ranked by urgency.
+st.subheader("📋 Due today & overdue")
+agenda_rows = []
 if not asana.empty:
     for (_, r), d in zip(asana.iterrows(), _as_date(asana["due_on"])):
-        if _is_date(d) and d < today:
+        if _is_date(d) and d <= today:
             p = priority.compute(d, "medium")
-            overdue_rows.append({"When": p.label, "Source": "Asana", "Task": r["name"],
-                                 "Company": r["company"], "Link": r["url"], "_s": p.score})
+            agenda_rows.append({"When": p.label, "Source": "Asana", "Task": r["name"],
+                                "Company": r["company"], "Link": r["url"], "_s": p.score})
 if not active.empty:
     for (_, r), d in zip(active.iterrows(), _as_date(active["due_at"])):
-        if _is_date(d) and d < today:
+        if _is_date(d) and d <= today:
             p = priority.compute(d, r["priority"])
-            overdue_rows.append({
+            agenda_rows.append({
                 "When": p.label, "Source": "HubSpot", "Task": r["subject"],
                 "Company": company_resolver.for_task(r),
                 "Link": f"{HUBSPOT_BASE}/tasks/{HUBSPOT_PORTAL_ID}/view/all/task/{r['id']}",
                 "_s": p.score})
 
-if overdue_rows:
-    od = pd.DataFrame(overdue_rows).sort_values("_s")
+if agenda_rows:
+    ag = pd.DataFrame(agenda_rows).sort_values("_s")
     st.caption(
-        f"{len(od)} overdue. Showing the 12 least stale — the ones most likely still live. "
-        "Full list on the **Tasks** page."
+        f"{len(ag)} item(s) overdue or due today. Showing the 12 most urgent — "
+        "full task list on the **Tasks** page."
     )
     st.dataframe(
-        od.head(12)[["When", "Source", "Task", "Company", "Link"]],
+        ag.head(12)[["When", "Source", "Task", "Company", "Link"]],
         width="stretch", hide_index=True,
         column_config={"Link": st.column_config.LinkColumn("", display_text="Open ↗", width="small")},
     )
 else:
-    st.success("Nothing overdue.")
-
-# --- pipeline --------------------------------------------------------------
-st.subheader("💰 Pipeline")
-if open_deals.empty:
-    st.info("No open deals cached.")
-else:
-    close = _as_date(open_deals["closedate"])
-    week = today + timedelta(days=7)
-    closing = open_deals[[_is_date(d) and today <= d <= week for d in close]]
-    if not closing.empty:
-        st.caption(f"**{len(closing)} closing in the next 7 days** — "
-                   f"${closing['amount'].fillna(0).sum():,.0f} at stake.")
-
-    top = open_deals.sort_values("amount", ascending=False).head(TOP_DEALS)
-    st.dataframe(
-        pd.DataFrame({
-            "Deal": top["name"],
-            "Amount": top["amount"],
-            "Stage": top.get("stage_label"),
-            "Close": _as_date(top["closedate"]),
-            "Link": [f"{HUBSPOT_BASE}/contacts/{HUBSPOT_PORTAL_ID}/record/0-3/{i}" for i in top["id"]],
-        }),
-        width="stretch", hide_index=True,
-        column_config={
-            "Amount": st.column_config.NumberColumn(format="$%d"),
-            "Link": st.column_config.LinkColumn("", display_text="Open ↗", width="small"),
-        },
-    )
+    st.success("Nothing overdue or due today. 🎉")
 
 # --- what the Slack version had that this doesn't --------------------------
 with st.expander("Not carried over from the Slack briefing"):

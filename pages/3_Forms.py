@@ -7,8 +7,6 @@ import streamlit as st
 from classify.leads import classify_dataframe
 from store import db
 
-st.set_page_config(page_title="Forms — EG Marketing Dashboard", page_icon="📨", layout="wide")
-
 if not st.session_state.get("authed"):
     st.warning("Sign in on the main page first.")
     st.stop()
