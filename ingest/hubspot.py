@@ -7,6 +7,7 @@ lastmodifieddate.
 """
 from __future__ import annotations
 
+import json
 import time
 from typing import Iterator
 
@@ -200,6 +201,45 @@ class HubSpotClient:
                     "pipeline_id": pid,
                 }
         return out
+
+    def get_deal_pipelines(self) -> list[dict]:
+        """Return ordered pipeline + stage metadata for the dashboard to render.
+
+        Shape: ``[{id, label, display_order, stages: [{id, label, display_order,
+        is_closed, is_won}]}]`` with stages and pipelines sorted by display order.
+        The dashboard needs this to show each pipeline (WTIS, Vendor, Wealth) by
+        name with its stages in the right order — the deal rows only carry opaque
+        pipeline/stage IDs. Degrades to ``[]`` if the pipelines scope is missing.
+        """
+        try:
+            data = self._get("/crm/v3/pipelines/deals")
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code in (401, 403):
+                return []
+            raise
+        pipelines: list[dict] = []
+        for pipe in data.get("results", []):
+            stages = []
+            for stage in pipe.get("stages", []):
+                md = stage.get("metadata", {}) or {}
+                is_closed = str(md.get("isClosed", "")).lower() == "true"
+                prob = _to_float(md.get("probability"))
+                stages.append({
+                    "id": stage.get("id"),
+                    "label": stage.get("label"),
+                    "display_order": stage.get("displayOrder") or 0,
+                    "is_closed": is_closed,
+                    "is_won": bool(is_closed and prob is not None and prob >= 1.0),
+                })
+            stages.sort(key=lambda s: s["display_order"])
+            pipelines.append({
+                "id": pipe.get("id"),
+                "label": pipe.get("label"),
+                "display_order": pipe.get("displayOrder") or 0,
+                "stages": stages,
+            })
+        pipelines.sort(key=lambda p: p["display_order"])
+        return pipelines
 
     def iter_deals(self) -> Iterator[dict]:
         """Yield raw deal objects with contact + company associations."""
@@ -416,6 +456,13 @@ def refresh(token: str, progress=None) -> dict:
         progress("Deals", 0, 0)
     # Resolve which stages mean "closed" for THIS portal (handles custom pipelines).
     stage_meta = client.get_deal_stage_metadata()
+    # Persist pipeline + stage names/order so the dashboard can render each
+    # pipeline (WTIS, Vendor, Wealth) by name with its stages in order. Stored as
+    # JSON in the stable `meta` table (no schema migration, survives the Streamlit
+    # Cloud module cache). Skipped silently when the pipelines scope is absent.
+    pipelines_struct = client.get_deal_pipelines()
+    if pipelines_struct:
+        db.set_meta("deal_pipelines", json.dumps(pipelines_struct))
     deal_rows: list[dict] = []
     for d in client.iter_deals():
         props = d.get("properties", {})
